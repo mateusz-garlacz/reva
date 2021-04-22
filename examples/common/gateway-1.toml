@@ -1,0 +1,51 @@
+[shared]
+gatewaysvc = "localhost:20000"
+[grpc]
+address = "localhost:20000"
+
+# services to enable
+[grpc.services.gateway]
+authregistrysvc = "localhost:20000"
+appprovidersvc = "localhost:20000"
+appregistry = "localhost:20000"
+storageregistrysvc = "localhost:20000"
+preferencessvc = "localhost:20000"
+userprovidersvc = "localhost:20000"
+usershareprovidersvc = "localhost:20000"
+publicshareprovidersvc = "localhost:20000"
+ocmcoresvc = "localhost:20000"
+ocmshareprovidersvc = "localhost:20000"
+ocminvitemanagersvc = "localhost:20000"
+ocmproviderauthorizersvc = "localhost:20000"
+#commit_share_to_storage_grant = false
+datagateway = "http://localhost:20001/data"
+transfer_expires = 6 # give it a moment
+commit_share_to_storage_grant = true
+commit_share_to_storage_ref = true
+
+[grpc.services.storageregistry]
+[grpc.services.storageregistry.drivers.static]
+home_provider = "/home"
+[grpc.services.storageregistry.drivers.static.rules."/home"]
+address = "localhost:18000"
+[grpc.services.storageregistry.drivers.static.rules."/reva"]
+address = "localhost:17000"
+[grpc.services.storageregistry.drivers.static.rules."123e4567-e89b-12d3-a456-426655440000"]
+address = "localhost:17000"
+
+[grpc.services.authprovider]
+[grpc.services.authregistry]
+[grpc.services.userprovider]
+[grpc.services.usershareprovider]
+[grpc.services.groupprovider]
+[grpc.services.publicshareprovider]
+[grpc.services.ocmcore]
+[grpc.services.ocmshareprovider]
+[grpc.services.ocminvitemanager]
+[grpc.services.ocmproviderauthorizer]
+
+[http.services.datagateway]
+[http.services.prometheus]
+[http.services.ocmd]
+[http.services.ocdav]
+[http.services.ocs]
