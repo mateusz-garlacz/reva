@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -83,6 +83,16 @@ func NewUnary(m map[string]interface{}, unprotected []string) (grpc.UnaryServerI
 		if utils.Skip(info.FullMethod, unprotected) {
 			span.AddAttributes(trace.BoolAttribute("auth_enabled", false))
 			log.Debug().Str("method", info.FullMethod).Msg("skipping auth")
+
+			// If a token is present, set it anyway, as we might need the user info
+			// to decide the storage provider.
+			tkn, ok := token.ContextGetToken(ctx)
+			if ok {
+				u, err := tokenManager.DismantleToken(ctx, tkn)
+				if err == nil {
+					ctx = user.ContextSetUser(ctx, u)
+				}
+			}
 			return handler(ctx, req)
 		}
 
@@ -111,7 +121,6 @@ func NewUnary(m map[string]interface{}, unprotected []string) (grpc.UnaryServerI
 		span.AddAttributes(trace.StringAttribute("user", u.String()), trace.StringAttribute("token", tkn))
 
 		ctx = user.ContextSetUser(ctx, u)
-		ctx = token.ContextSetToken(ctx, tkn)
 		return handler(ctx, req)
 	}
 	return interceptor, nil
@@ -144,7 +153,19 @@ func NewStream(m map[string]interface{}, unprotected []string) (grpc.StreamServe
 		log := appctx.GetLogger(ctx)
 
 		if utils.Skip(info.FullMethod, unprotected) {
-			log.Debug().Str("method", info.FullMethod).Msg("skiping auth")
+			log.Debug().Str("method", info.FullMethod).Msg("skipping auth")
+
+			// If a token is present, set it anyway, as we might need the user info
+			// to decide the storage provider.
+			tkn, ok := token.ContextGetToken(ctx)
+			if ok {
+				u, err := tokenManager.DismantleToken(ctx, tkn)
+				if err == nil {
+					ctx = user.ContextSetUser(ctx, u)
+					ss = newWrappedServerStream(ctx, ss)
+				}
+			}
+
 			return handler(srv, ss)
 		}
 
@@ -170,8 +191,6 @@ func NewStream(m map[string]interface{}, unprotected []string) (grpc.StreamServe
 
 		// store user and core access token in context.
 		ctx = user.ContextSetUser(ctx, u)
-		ctx = token.ContextSetToken(ctx, tkn)
-
 		wrapped := newWrappedServerStream(ctx, ss)
 		return handler(srv, wrapped)
 	}

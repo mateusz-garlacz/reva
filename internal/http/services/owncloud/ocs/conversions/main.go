@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,12 +20,16 @@
 package conversions
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"path"
 	"time"
 
 	"github.com/cs3org/reva/pkg/publicshare"
 	"github.com/cs3org/reva/pkg/user"
 
+	grouppb "github.com/cs3org/go-cs3apis/cs3/identity/group/v1beta1"
 	userpb "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
 	collaboration "github.com/cs3org/go-cs3apis/cs3/sharing/collaboration/v1beta1"
 	link "github.com/cs3org/go-cs3apis/cs3/sharing/link/v1beta1"
@@ -43,10 +47,10 @@ const (
 	ShareTypePublicLink ShareType = 3
 
 	// ShareTypeGroup represents a group share
-	// ShareTypeGroup shareType = 1
+	ShareTypeGroup ShareType = 1
 
 	// ShareTypeFederatedCloudShare represents a federated share
-	// ShareTypeFederatedCloudShare shareType = 6
+	ShareTypeFederatedCloudShare ShareType = 6
 )
 
 // ResourceType indicates the OCS type of the resource
@@ -71,11 +75,6 @@ func (rt ResourceType) String() (s string) {
 // ShareType denotes a type of share
 type ShareType int
 
-// Element is a commodity type wraps members of any interface (as per Owncloud's OCS V1 Spec)
-type Element struct {
-	Data interface{} `json:"element" xml:"element"`
-}
-
 // ShareData represents https://doc.owncloud.com/server/developer_manual/core/ocs-share-api.html#response-attributes-1
 type ShareData struct {
 	// TODO int?
@@ -86,6 +85,8 @@ type ShareData struct {
 	UIDOwner string `json:"uid_owner" xml:"uid_owner"`
 	// The display name of the owner of the share.
 	DisplaynameOwner string `json:"displayname_owner" xml:"displayname_owner"`
+	// Additional info to identify the share owner, eg. the email or username
+	AdditionalInfoOwner string `json:"additional_info_owner" xml:"additional_info_owner"`
 	// The permission attribute set on the file.
 	// TODO(jfd) change the default to read only
 	Permissions Permissions `json:"permissions" xml:"permissions"`
@@ -101,9 +102,13 @@ type ShareData struct {
 	UIDFileOwner string `json:"uid_file_owner" xml:"uid_file_owner"`
 	// The display name of the user that owns the file or folder being shared.
 	DisplaynameFileOwner string `json:"displayname_file_owner" xml:"displayname_file_owner"`
+	// Additional info to identify the file owner, eg. the email or username
+	AdditionalInfoFileOwner string `json:"additional_info_file_owner" xml:"additional_info_file_owner"`
+	// share state, 0 = accepted, 1 = pending, 2 = declined
+	State int `json:"state" xml:"state"`
 	// The path to the shared file or folder.
 	Path string `json:"path" xml:"path"`
-	// The type of the object being shared. This can be one of file or folder.
+	// The type of the object being shared. This can be one of 'file' or 'folder'.
 	ItemType string `json:"item_type" xml:"item_type"`
 	// The RFC2045-compliant mimetype of the file.
 	MimeType  string `json:"mimetype" xml:"mimetype"`
@@ -115,18 +120,27 @@ type ShareData struct {
 	FileSource string `json:"file_source" xml:"file_source"`
 	// The unique node id of the parent node of the item being shared.
 	FileParent string `json:"file_parent" xml:"file_parent"`
-	// The name of the shared file.
+	// The basename of the shared file.
 	FileTarget string `json:"file_target" xml:"file_target"`
-	// The uid of the receiver of the file. This is either
+	// The uid of the share recipient. This is either
 	// - a GID (group id) if it is being shared with a group or
 	// - a UID (user id) if the share is shared with a user.
-	ShareWith string `json:"share_with" xml:"share_with"`
-	// The display name of the receiver of the file.
-	ShareWithDisplayname string `json:"share_with_displayname" xml:"share_with_displayname"`
-	// sharee Additional info
+	// - a password for public links
+	ShareWith string `json:"share_with,omitempty" xml:"share_with,omitempty"`
+	// The display name of the share recipient
+	ShareWithDisplayname string `json:"share_with_displayname,omitempty" xml:"share_with_displayname,omitempty"`
+	// Additional info to identify the share recipient, eg. the email or username
 	ShareWithAdditionalInfo string `json:"share_with_additional_info" xml:"share_with_additional_info"`
 	// Whether the recipient was notified, by mail, about the share being shared with them.
-	MailSend string `json:"mail_send" xml:"mail_send"`
+	MailSend int `json:"mail_send" xml:"mail_send"`
+	// Name of the public share
+	Name string `json:"name" xml:"name"`
+	// URL of the public share
+	URL string `json:"url,omitempty" xml:"url,omitempty"`
+	// Attributes associated
+	Attributes string `json:"attributes,omitempty" xml:"attributes,omitempty"`
+	// PasswordProtected represents a public share is password protected
+	// PasswordProtected bool `json:"password_protected,omitempty" xml:"password_protected,omitempty"`
 }
 
 // ShareeData holds share recipient search results
@@ -152,138 +166,95 @@ type MatchData struct {
 
 // MatchValueData holds the type and actual value
 type MatchValueData struct {
-	ShareType int    `json:"shareType" xml:"shareType"`
-	ShareWith string `json:"shareWith" xml:"shareWith"`
+	ShareType               int    `json:"shareType" xml:"shareType"`
+	ShareWith               string `json:"shareWith" xml:"shareWith"`
+	ShareWithAdditionalInfo string `json:"shareWithAdditionalInfo" xml:"shareWithAdditionalInfo"`
 }
 
-// Role2CS3Permissions converts string roles (from the request body) into cs3 permissions
-// TODO(refs) consider using a mask instead of booleans here, might reduce all this boilerplate
-func Role2CS3Permissions(r string) (*provider.ResourcePermissions, error) {
-	switch r {
-	case RoleViewer:
-		return &provider.ResourcePermissions{
-			ListContainer:        true,
-			ListGrants:           true,
-			ListFileVersions:     true,
-			ListRecycle:          true,
-			Stat:                 true,
-			GetPath:              true,
-			GetQuota:             true,
-			InitiateFileDownload: true,
-		}, nil
-	case RoleEditor:
-		return &provider.ResourcePermissions{
-			ListContainer:        true,
-			ListGrants:           true,
-			ListFileVersions:     true,
-			ListRecycle:          true,
-			Stat:                 true,
-			GetPath:              true,
-			GetQuota:             true,
-			InitiateFileDownload: true,
-
-			Move:               true,
-			InitiateFileUpload: true,
-			RestoreFileVersion: true,
-			RestoreRecycleItem: true,
-			CreateContainer:    true,
-			Delete:             true,
-			PurgeRecycle:       true,
-		}, nil
-	case RoleCoowner:
-		return &provider.ResourcePermissions{
-			ListContainer:        true,
-			ListGrants:           true,
-			ListFileVersions:     true,
-			ListRecycle:          true,
-			Stat:                 true,
-			GetPath:              true,
-			GetQuota:             true,
-			InitiateFileDownload: true,
-
-			Move:               true,
-			InitiateFileUpload: true,
-			RestoreFileVersion: true,
-			RestoreRecycleItem: true,
-			CreateContainer:    true,
-			Delete:             true,
-			PurgeRecycle:       true,
-
-			AddGrant:    true,
-			RemoveGrant: true, // TODO when are you able to unshare / delete
-			UpdateGrant: true,
-		}, nil
-	default:
-		return nil, fmt.Errorf("unknown role: %s", r)
-	}
-}
-
-// AsCS3Permissions returns permission values as cs3api permissions
-// TODO sort out mapping, this is just a first guess
-// TODO use roles to make this configurable
-func AsCS3Permissions(p int, rp *provider.ResourcePermissions) *provider.ResourcePermissions {
-	if rp == nil {
-		rp = &provider.ResourcePermissions{}
+// CS3Share2ShareData converts a cs3api user share into shareData data model
+func CS3Share2ShareData(ctx context.Context, share *collaboration.Share) (*ShareData, error) {
+	sd := &ShareData{
+		// share.permissions are mapped below
+		// Displaynames are added later
+		UIDOwner:     LocalUserIDToString(share.GetCreator()),
+		UIDFileOwner: LocalUserIDToString(share.GetOwner()),
 	}
 
-	if p&int(PermissionRead) != 0 {
-		rp.ListContainer = true
-		rp.ListGrants = true
-		rp.ListFileVersions = true
-		rp.ListRecycle = true
-		rp.Stat = true
-		rp.GetPath = true
-		rp.GetQuota = true
-		rp.InitiateFileDownload = true
+	if share.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_USER {
+		sd.ShareType = ShareTypeUser
+		sd.ShareWith = LocalUserIDToString(share.Grantee.GetUserId())
+	} else if share.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_GROUP {
+		sd.ShareType = ShareTypeGroup
+		sd.ShareWith = LocalGroupIDToString(share.Grantee.GetGroupId())
 	}
-	if p&int(PermissionWrite) != 0 {
-		rp.InitiateFileUpload = true
-		rp.RestoreFileVersion = true
-		rp.RestoreRecycleItem = true
+
+	if share.Id != nil {
+		sd.ID = share.Id.OpaqueId
 	}
-	if p&int(PermissionCreate) != 0 {
-		rp.CreateContainer = true
-		// FIXME permissions mismatch: double check create vs write file
-		rp.InitiateFileUpload = true
-		if p&int(PermissionWrite) != 0 {
-			rp.Move = true // TODO move only when create and write?
-		}
+	if share.GetPermissions() != nil && share.GetPermissions().GetPermissions() != nil {
+		sd.Permissions = RoleFromResourcePermissions(share.GetPermissions().GetPermissions()).OCSPermissions()
 	}
-	if p&int(PermissionDelete) != 0 {
-		rp.Delete = true
-		rp.PurgeRecycle = true
+	if share.Ctime != nil {
+		sd.STime = share.Ctime.Seconds // TODO CS3 api birth time = btime
 	}
-	if p&int(PermissionShare) != 0 {
-		rp.AddGrant = true
-		rp.RemoveGrant = true // TODO when are you able to unshare / delete
-		rp.UpdateGrant = true
-	}
-	return rp
+	return sd, nil
 }
 
 // PublicShare2ShareData converts a cs3api public share into shareData data model
-func PublicShare2ShareData(share *link.PublicShare) *ShareData {
-	return &ShareData{
-		// TODO map share.resourceId to path and storage ... requires a stat call
-		// share.permissions ar mapped below
-		// TODO lookup user metadata
-		//DisplaynameOwner:     creator.DisplayName,
-		// TODO lookup user metadata
-		// DisplaynameFileOwner: owner.DisplayName,
-		ID:           share.Id.OpaqueId,
-		Permissions:  publicSharePermissions2OCSPermissions(share.GetPermissions()),
+func PublicShare2ShareData(share *link.PublicShare, r *http.Request, publicURL string) *ShareData {
+	sd := &ShareData{
+		// share.permissions are mapped below
+		// Displaynames are added later
 		ShareType:    ShareTypePublicLink,
-		UIDOwner:     UserIDToString(share.Creator),
-		STime:        share.Ctime.Seconds, // TODO CS3 api birth time = btime
-		UIDFileOwner: UserIDToString(share.Owner),
 		Token:        share.Token,
-		Expiration:   timestampToExpiration(share.Expiration),
+		Name:         share.DisplayName,
+		MailSend:     0,
+		URL:          publicURL + path.Join("/", "#/s/"+share.Token),
+		UIDOwner:     LocalUserIDToString(share.Creator),
+		UIDFileOwner: LocalUserIDToString(share.Owner),
 	}
-	// actually clients should be able to GET and cache the user info themselves ...
-	// TODO check grantee type for user vs group
+	if share.Id != nil {
+		sd.ID = share.Id.OpaqueId
+	}
+	if share.GetPermissions() != nil && share.GetPermissions().GetPermissions() != nil {
+		sd.Permissions = RoleFromResourcePermissions(share.GetPermissions().GetPermissions()).OCSPermissions()
+	}
+	if share.Expiration != nil {
+		sd.Expiration = timestampToExpiration(share.Expiration)
+	}
+	if share.Ctime != nil {
+		sd.STime = share.Ctime.Seconds // TODO CS3 api birth time = btime
+	}
+
+	// hide password
+	if share.PasswordProtected {
+		sd.ShareWith = "***redacted***"
+		sd.ShareWithDisplayname = "***redacted***"
+	}
+
+	return sd
+}
+
+// LocalUserIDToString transforms a cs3api user id into an ocs data model without domain name
+// TODO ocs uses user names ... so an additional lookup is needed. see mapUserIds()
+func LocalUserIDToString(userID *userpb.UserId) string {
+	if userID == nil || userID.OpaqueId == "" {
+		return ""
+	}
+	return userID.OpaqueId
+}
+
+// LocalGroupIDToString transforms a cs3api group id into an ocs data model without domain name
+func LocalGroupIDToString(groupID *grouppb.GroupId) string {
+	if groupID == nil || groupID.OpaqueId == "" {
+		return ""
+	}
+	return groupID.OpaqueId
 }
 
 // UserIDToString transforms a cs3api user id into an ocs data model
+// TODO This should be used instead of LocalUserIDToString bit it requires interpreting an @ on the client side
+// TODO An alternative would be to send the idp / iss as an additional attribute. might be less intrusive
 func UserIDToString(userID *userpb.UserId) string {
 	if userID == nil || userID.OpaqueId == "" {
 		return ""
@@ -292,14 +263,6 @@ func UserIDToString(userID *userpb.UserId) string {
 		return userID.OpaqueId
 	}
 	return userID.OpaqueId + "@" + userID.Idp
-}
-
-// UserSharePermissions2OCSPermissions transforms cs3api permissions into OCS Permissions data model
-func UserSharePermissions2OCSPermissions(sp *collaboration.SharePermissions) Permissions {
-	if sp != nil {
-		return permissions2OCSPermissions(sp.GetPermissions())
-	}
-	return PermissionInvalid
 }
 
 // GetUserManager returns a connection to a user share manager
@@ -320,49 +283,25 @@ func GetPublicShareManager(manager string, m map[string]map[string]interface{}) 
 	return nil, fmt.Errorf("driver %s not found for public shares manager", manager)
 }
 
-func publicSharePermissions2OCSPermissions(sp *link.PublicSharePermissions) Permissions {
-	if sp != nil {
-		return permissions2OCSPermissions(sp.GetPermissions())
-	}
-	return PermissionInvalid
-}
-
-// TODO sort out mapping, this is just a first guess
-func permissions2OCSPermissions(p *provider.ResourcePermissions) Permissions {
-	permissions := PermissionInvalid
-	if p != nil {
-		if p.ListContainer {
-			permissions += PermissionRead
-		}
-		if p.InitiateFileUpload {
-			permissions += PermissionWrite
-		}
-		if p.CreateContainer {
-			permissions += PermissionCreate
-		}
-		if p.Delete {
-			permissions += PermissionDelete
-		}
-		if p.AddGrant {
-			permissions += PermissionShare
-		}
-	}
-	return permissions
-}
-
 // timestamp is assumed to be UTC ... just human readable ...
 // FIXME and ambiguous / error prone because there is no time zone ...
 func timestampToExpiration(t *types.Timestamp) string {
-	return time.Unix(int64(t.Seconds), int64(t.Nanos)).Format("2006-01-02 15:05:05")
+	return time.Unix(int64(t.Seconds), int64(t.Nanos)).UTC().Format("2006-01-02 15:05:05")
 }
 
-const (
-	// RoleLegacy provides backwards compatibility
-	RoleLegacy string = "legacy"
-	// RoleViewer grants non-editor role on a resource
-	RoleViewer string = "viewer"
-	// RoleEditor grants editor permission on a resource
-	RoleEditor string = "editor"
-	// RoleCoowner grants owner permissions on a resource
-	RoleCoowner string = "coowner"
-)
+// ParseTimestamp tries to parses the ocs expiry into a CS3 Timestamp
+func ParseTimestamp(timestampString string) (*types.Timestamp, error) {
+	parsedTime, err := time.Parse("2006-01-02T15:04:05Z0700", timestampString)
+	if err != nil {
+		parsedTime, err = time.Parse("2006-01-02", timestampString)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("datetime format invalid: %v", timestampString)
+	}
+	final := parsedTime.UnixNano()
+
+	return &types.Timestamp{
+		Seconds: uint64(final / 1000000000),
+		Nanos:   uint32(final % 1000000000),
+	}, nil
+}

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,25 +19,27 @@
 package main
 
 import (
-	"fmt"
+	"io"
 	"log"
-	"os"
 	"path"
 
 	"github.com/cs3org/reva/pkg/storage/migrate"
+	"github.com/pkg/errors"
 )
 
 func importCommand() *command {
 	cmd := newCommand("import")
 	cmd.Description = func() string { return "import metadata" }
 	cmd.Usage = func() string { return "Usage: import [-flags] <user export folder>" }
-
 	namespaceFlag := cmd.String("n", "/", "CS3 namespace prefix")
 
-	cmd.Action = func() error {
+	cmd.ResetFlags = func() {
+		*namespaceFlag = "/"
+	}
+
+	cmd.Action = func(w ...io.Writer) error {
 		if cmd.NArg() < 1 {
-			fmt.Println(cmd.Usage())
-			os.Exit(1)
+			return errors.New("Invalid arguments: " + cmd.Usage())
 		}
 		exportPath := cmd.Args()[0]
 

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-const defaultExpiraton int64 = 3600 // 1 hour
+const defaultExpiration int64 = 86400 // 1 day
 
 func init() {
 	registry.Register("jwt", New)
@@ -60,7 +60,7 @@ func New(value map[string]interface{}) (token.Manager, error) {
 	}
 
 	if c.Expires == 0 {
-		c.Expires = defaultExpiraton
+		c.Expires = defaultExpiration
 	}
 
 	c.Secret = sharedconf.GetJWTSecret(c.Secret)

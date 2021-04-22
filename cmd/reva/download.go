@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,21 +23,28 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/cheggaaa/pb"
+	gateway "github.com/cs3org/go-cs3apis/cs3/gateway/v1beta1"
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
+	"github.com/cs3org/reva/internal/http/services/datagateway"
+	"github.com/cs3org/reva/pkg/errtypes"
 	"github.com/cs3org/reva/pkg/rhttp"
+	tokenpkg "github.com/cs3org/reva/pkg/token"
+	"github.com/cs3org/reva/pkg/utils"
+	"github.com/pkg/errors"
+	"github.com/studio-b12/gowebdav"
 )
 
 func downloadCommand() *command {
 	cmd := newCommand("download")
-	cmd.Description = func() string { return "download a remote file into the local filesystem" }
+	cmd.Description = func() string { return "download a remote file to the local filesystem" }
 	cmd.Usage = func() string { return "Usage: download [-flags] <remote_file> <local_file>" }
-	cmd.Action = func() error {
+	cmd.Action = func(w ...io.Writer) error {
 		if cmd.NArg() < 2 {
-			fmt.Println(cmd.Usage())
-			os.Exit(1)
+			return errors.New("Invalid arguments: " + cmd.Usage())
 		}
 
 		remote := cmd.Args()[0]
@@ -79,43 +86,119 @@ func downloadCommand() *command {
 			return formatError(res.Status)
 		}
 
+		p, err := getDownloadProtocolInfo(res.Protocols, "simple")
+		if err != nil {
+			return err
+		}
+
 		// TODO(labkode): upload to data server
-		fmt.Printf("Downloading from: %s\n", res.DownloadEndpoint)
+		fmt.Printf("Downloading from: %s\n", p.DownloadEndpoint)
 
-		dataServerURL := res.DownloadEndpoint
-		// TODO(labkode): do a protocol switch
-		httpReq, err := rhttp.NewRequest(ctx, "GET", dataServerURL, nil)
+		content, err := checkDownloadWebdavRef(res.Protocols)
 		if err != nil {
-			return err
+			if _, ok := err.(errtypes.IsNotSupported); !ok {
+				return err
+			}
+
+			dataServerURL := p.DownloadEndpoint
+			// TODO(labkode): do a protocol switch
+			httpReq, err := rhttp.NewRequest(ctx, "GET", dataServerURL, nil)
+			if err != nil {
+				return err
+			}
+
+			httpReq.Header.Set(datagateway.TokenTransportHeader, p.Token)
+			httpClient := rhttp.GetHTTPClient(
+				rhttp.Context(ctx),
+				// TODO make insecure configurable
+				rhttp.Insecure(true),
+				// TODO make timeout configurable
+				rhttp.Timeout(time.Duration(24*int64(time.Hour))),
+			)
+
+			httpRes, err := httpClient.Do(httpReq)
+			if err != nil {
+				return err
+			}
+			defer httpRes.Body.Close()
+
+			if httpRes.StatusCode != http.StatusOK {
+				return err
+			}
+			content = httpRes.Body
 		}
 
-		httpReq.Header.Set("X-Reva-Transfer", res.Token)
-		httpClient := rhttp.GetHTTPClient(ctx)
-
-		httpRes, err := httpClient.Do(httpReq)
-		if err != nil {
-			return err
-		}
-		defer httpRes.Body.Close()
-
-		if httpRes.StatusCode != http.StatusOK {
-			return err
-		}
-
-		fd, err := os.OpenFile(local, os.O_CREATE|os.O_WRONLY, 0644)
+		absPath, err := utils.ResolvePath(local)
 		if err != nil {
 			return err
 		}
 
 		bar := pb.New(int(info.Size)).SetUnits(pb.U_BYTES)
 		bar.Start()
-		reader := bar.NewProxyReader(httpRes.Body)
+		reader := bar.NewProxyReader(content)
+
+		fd, err := os.OpenFile(absPath, os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
 		if _, err := io.Copy(fd, reader); err != nil {
 			return err
 		}
 		bar.Finish()
 		return nil
-
 	}
 	return cmd
+}
+
+func getDownloadProtocolInfo(protocolInfos []*gateway.FileDownloadProtocol, protocol string) (*gateway.FileDownloadProtocol, error) {
+	for _, p := range protocolInfos {
+		if p.Protocol == protocol {
+			return p, nil
+		}
+	}
+	return nil, errtypes.NotFound(protocol)
+}
+
+func checkDownloadWebdavRef(protocols []*gateway.FileDownloadProtocol) (io.Reader, error) {
+	p, err := getDownloadProtocolInfo(protocols, "simple")
+	if err != nil {
+		return nil, err
+	}
+
+	if p.Opaque == nil {
+		return nil, errtypes.NotSupported("opaque object not defined")
+	}
+
+	var token string
+	tokenOpaque, ok := p.Opaque.Map["webdav-token"]
+	if !ok {
+		return nil, errtypes.NotSupported("webdav token not defined")
+	}
+	switch tokenOpaque.Decoder {
+	case "plain":
+		token = string(tokenOpaque.Value)
+	default:
+		return nil, errors.New("opaque entry decoder not recognized: " + tokenOpaque.Decoder)
+	}
+
+	var filePath string
+	fileOpaque, ok := p.Opaque.Map["webdav-file-path"]
+	if !ok {
+		return nil, errtypes.NotSupported("webdav file path not defined")
+	}
+	switch fileOpaque.Decoder {
+	case "plain":
+		filePath = string(fileOpaque.Value)
+	default:
+		return nil, errors.New("opaque entry decoder not recognized: " + fileOpaque.Decoder)
+	}
+
+	c := gowebdav.NewClient(p.DownloadEndpoint, "", "")
+	c.SetHeader(tokenpkg.TokenHeader, token)
+
+	reader, err := c.ReadStream(filePath)
+	if err != nil {
+		return nil, err
+	}
+	return reader, nil
 }

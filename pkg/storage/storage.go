@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,15 +34,16 @@ type FS interface {
 	CreateDir(ctx context.Context, fn string) error
 	Delete(ctx context.Context, ref *provider.Reference) error
 	Move(ctx context.Context, oldRef, newRef *provider.Reference) error
-	GetMD(ctx context.Context, ref *provider.Reference) (*provider.ResourceInfo, error)
-	ListFolder(ctx context.Context, ref *provider.Reference) ([]*provider.ResourceInfo, error)
+	GetMD(ctx context.Context, ref *provider.Reference, mdKeys []string) (*provider.ResourceInfo, error)
+	ListFolder(ctx context.Context, ref *provider.Reference, mdKeys []string) ([]*provider.ResourceInfo, error)
+	InitiateUpload(ctx context.Context, ref *provider.Reference, uploadLength int64, metadata map[string]string) (map[string]string, error)
 	Upload(ctx context.Context, ref *provider.Reference, r io.ReadCloser) error
 	Download(ctx context.Context, ref *provider.Reference) (io.ReadCloser, error)
 	ListRevisions(ctx context.Context, ref *provider.Reference) ([]*provider.FileVersion, error)
 	DownloadRevision(ctx context.Context, ref *provider.Reference, key string) (io.ReadCloser, error)
 	RestoreRevision(ctx context.Context, ref *provider.Reference, key string) error
 	ListRecycle(ctx context.Context) ([]*provider.RecycleItem, error)
-	RestoreRecycleItem(ctx context.Context, key string) error
+	RestoreRecycleItem(ctx context.Context, key, restorePath string) error
 	PurgeRecycleItem(ctx context.Context, key string) error
 	EmptyRecycle(ctx context.Context) error
 	GetPathByID(ctx context.Context, id *provider.ResourceId) (string, error)
@@ -50,7 +51,7 @@ type FS interface {
 	RemoveGrant(ctx context.Context, ref *provider.Reference, g *provider.Grant) error
 	UpdateGrant(ctx context.Context, ref *provider.Reference, g *provider.Grant) error
 	ListGrants(ctx context.Context, ref *provider.Reference) ([]*provider.Grant, error)
-	GetQuota(ctx context.Context) (int, int, error)
+	GetQuota(ctx context.Context) (uint64, uint64, error)
 	CreateReference(ctx context.Context, path string, targetURI *url.URL) error
 	Shutdown(ctx context.Context) error
 	SetArbitraryMetadata(ctx context.Context, ref *provider.Reference, md *provider.ArbitraryMetadata) error
@@ -60,7 +61,7 @@ type FS interface {
 // Registry is the interface that storage registries implement
 // for discovering storage providers
 type Registry interface {
-	FindProvider(ctx context.Context, ref *provider.Reference) (*registry.ProviderInfo, error)
+	FindProviders(ctx context.Context, ref *provider.Reference) ([]*registry.ProviderInfo, error)
 	ListProviders(ctx context.Context) ([]*registry.ProviderInfo, error)
 	GetHome(ctx context.Context) (*registry.ProviderInfo, error)
 }

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ func NewUnary() grpc.UnaryServerInterceptor {
 	return interceptor
 }
 
-// NewStream returns a streaming server inteceptor that adds telemetry to
+// NewStream returns a streaming server interceptor that adds telemetry to
 // streaming grpc calls.
 func NewStream() grpc.StreamServerInterceptor {
 	interceptor := grpc_recovery.StreamServerInterceptor(grpc_recovery.WithRecoveryHandlerContext(recoveryFunc))
@@ -45,8 +45,8 @@ func NewStream() grpc.StreamServerInterceptor {
 }
 
 func recoveryFunc(ctx context.Context, p interface{}) (err error) {
-	stack := debug.Stack()
+	debug.PrintStack()
 	log := appctx.GetLogger(ctx)
-	log.Error().Str("stack", string(stack)).Msgf("%+v", p)
+	log.Error().Msgf("%+v", p)
 	return status.Errorf(codes.Internal, "%s", p)
 }

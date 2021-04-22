@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ package main
 
 import (
 	"fmt"
-	"os"
+	"io"
 
 	gateway "github.com/cs3org/go-cs3apis/cs3/gateway/v1beta1"
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
@@ -31,10 +31,14 @@ func whoamiCommand() *command {
 	cmd.Description = func() string { return "tells who you are" }
 	tokenFlag := cmd.String("token", "", "access token to use")
 
-	cmd.Action = func() error {
+	cmd.ResetFlags = func() {
+		*tokenFlag = ""
+	}
+
+	cmd.Action = func(w ...io.Writer) error {
 		if cmd.NArg() != 0 {
 			cmd.PrintDefaults()
-			os.Exit(1)
+			return nil
 		}
 		var token string
 		if *tokenFlag != "" {
@@ -43,8 +47,8 @@ func whoamiCommand() *command {
 			// read token from file
 			t, err := readToken()
 			if err != nil {
-				fmt.Println("the token file cannot be readed from file ", getTokenFile())
-				fmt.Println("make sure you have login before with \"reva login\"")
+				fmt.Println("the token file cannot be read from file ", getTokenFile())
+				fmt.Println("make sure you have logged in before with \"reva login\"")
 				return err
 			}
 			token = t

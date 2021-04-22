@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,10 +20,11 @@ package main
 
 import (
 	"fmt"
-	"os"
+	"io"
 
 	gateway "github.com/cs3org/go-cs3apis/cs3/gateway/v1beta1"
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
+	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
 )
 
 func recycleListCommand() *command {
@@ -31,20 +32,26 @@ func recycleListCommand() *command {
 	cmd.Description = func() string { return "list a recycle bin" }
 	cmd.Usage = func() string { return "Usage: recycle-list [-flags] " }
 
-	cmd.Action = func() error {
-		if cmd.NArg() < 0 {
-			fmt.Println(cmd.Usage())
-			os.Exit(1)
-		}
-
+	cmd.Action = func(w ...io.Writer) error {
 		client, err := getClient()
 		if err != nil {
 			return err
 		}
 
-		req := &gateway.ListRecycleRequest{}
-
 		ctx := getAuthContext()
+
+		getHomeRes, err := client.GetHome(ctx, &provider.GetHomeRequest{})
+		if err != nil {
+			return err
+		}
+
+		req := &gateway.ListRecycleRequest{
+			Ref: &provider.Reference{
+				Spec: &provider.Reference_Path{
+					Path: getHomeRes.Path,
+				},
+			},
+		}
 		res, err := client.ListRecycle(ctx, req)
 		if err != nil {
 			return err

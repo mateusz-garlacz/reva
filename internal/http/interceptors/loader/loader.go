@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,5 +21,6 @@ package loader
 import (
 	// Load core HTTP middlewares.
 	_ "github.com/cs3org/reva/internal/http/interceptors/cors"
-	// Add your own middlware.
+	_ "github.com/cs3org/reva/internal/http/interceptors/providerauthorizer"
+	// Add your own middleware.
 )

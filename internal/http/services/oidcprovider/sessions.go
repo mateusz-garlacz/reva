@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -94,26 +94,6 @@ func (s *svc) doSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for id, c := range s.store.AccessTokens {
-		_, err := w.Write([]byte(fmt.Sprintf(`
-			<li>
-				%s: %#v
-			</li>`,
-
-			id, c,
-		)))
-		if err != nil {
-			log.Error().Err(err).Msg("Error writing response")
-			return
-		}
-	}
-	// Implicit
-	_, err = w.Write([]byte(`</ul><p>Implicit</p><ul>`))
-	if err != nil {
-		log.Error().Err(err).Msg("Error writing response")
-		return
-	}
-	for id, c := range s.store.Implicit {
-		c := c
 		_, err := w.Write([]byte(fmt.Sprintf(`
 			<li>
 				%s: %#v

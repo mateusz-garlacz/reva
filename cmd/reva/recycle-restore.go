@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,11 +19,11 @@
 package main
 
 import (
-	"fmt"
-	"os"
+	"io"
 
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
+	"github.com/pkg/errors"
 )
 
 func recycleRestoreCommand() *command {
@@ -31,10 +31,9 @@ func recycleRestoreCommand() *command {
 	cmd.Description = func() string { return "restore a recycle bin item" }
 	cmd.Usage = func() string { return "Usage: recycle-restore [-flags] key" }
 
-	cmd.Action = func() error {
+	cmd.Action = func(w ...io.Writer) error {
 		if cmd.NArg() < 1 {
-			fmt.Println(cmd.Usage())
-			os.Exit(1)
+			return errors.New("Invalid arguments: " + cmd.Usage())
 		}
 
 		key := cmd.Args()[0]
@@ -44,11 +43,22 @@ func recycleRestoreCommand() *command {
 			return err
 		}
 
+		ctx := getAuthContext()
+
+		getHomeRes, err := client.GetHome(ctx, &provider.GetHomeRequest{})
+		if err != nil {
+			return err
+		}
+
 		req := &provider.RestoreRecycleItemRequest{
+			Ref: &provider.Reference{
+				Spec: &provider.Reference_Path{
+					Path: getHomeRes.Path,
+				},
+			},
 			Key: key,
 		}
 
-		ctx := getAuthContext()
 		res, err := client.RestoreRecycleItem(ctx, req)
 		if err != nil {
 			return err

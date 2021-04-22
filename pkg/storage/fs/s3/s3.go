@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -142,6 +142,32 @@ type s3FS struct {
 	config *config
 }
 
+// permissionSet returns the permission set for the current user
+func (fs *s3FS) permissionSet(ctx context.Context) *provider.ResourcePermissions {
+	// TODO fix permissions for share recipients by traversing reading acls up to the root? cache acls for the parent node and reuse it
+	return &provider.ResourcePermissions{
+		// owner has all permissions
+		AddGrant:             true,
+		CreateContainer:      true,
+		Delete:               true,
+		GetPath:              true,
+		GetQuota:             true,
+		InitiateFileDownload: true,
+		InitiateFileUpload:   true,
+		ListContainer:        true,
+		ListFileVersions:     true,
+		ListGrants:           true,
+		ListRecycle:          true,
+		Move:                 true,
+		PurgeRecycle:         true,
+		RemoveGrant:          true,
+		RestoreFileVersion:   true,
+		RestoreRecycleItem:   true,
+		Stat:                 true,
+		UpdateGrant:          true,
+	}
+}
+
 func (fs *s3FS) normalizeObject(ctx context.Context, o *s3.Object, fn string) *provider.ResourceInfo {
 	fn = fs.removeRoot(path.Join("/", fn))
 	isDir := strings.HasSuffix(*o.Key, "/")
@@ -151,7 +177,7 @@ func (fs *s3FS) normalizeObject(ctx context.Context, o *s3.Object, fn string) *p
 		Type:          getResourceType(isDir),
 		Etag:          *o.ETag,
 		MimeType:      mime.Detect(isDir, fn),
-		PermissionSet: &provider.ResourcePermissions{ListContainer: true, CreateContainer: true},
+		PermissionSet: fs.permissionSet(ctx),
 		Size:          uint64(*o.Size),
 		Mtime: &types.Timestamp{
 			Seconds: uint64(o.LastModified.Unix()),
@@ -180,7 +206,7 @@ func (fs *s3FS) normalizeHead(ctx context.Context, o *s3.HeadObjectOutput, fn st
 		Type:          getResourceType(isDir),
 		Etag:          *o.ETag,
 		MimeType:      mime.Detect(isDir, fn),
-		PermissionSet: &provider.ResourcePermissions{ListContainer: true, CreateContainer: true},
+		PermissionSet: fs.permissionSet(ctx),
 		Size:          uint64(*o.ContentLength),
 		Mtime: &types.Timestamp{
 			Seconds: uint64(o.LastModified.Unix()),
@@ -200,7 +226,7 @@ func (fs *s3FS) normalizeCommonPrefix(ctx context.Context, p *s3.CommonPrefix) *
 		Type:          getResourceType(true),
 		Etag:          "TODO(labkode)",
 		MimeType:      mime.Detect(true, fn),
-		PermissionSet: &provider.ResourcePermissions{ListContainer: true, CreateContainer: true},
+		PermissionSet: fs.permissionSet(ctx),
 		Size:          0,
 		Mtime: &types.Timestamp{
 			Seconds: 0,
@@ -236,7 +262,7 @@ func (fs *s3FS) UpdateGrant(ctx context.Context, ref *provider.Reference, g *pro
 	return errtypes.NotSupported("s3: operation not supported")
 }
 
-func (fs *s3FS) GetQuota(ctx context.Context) (int, int, error) {
+func (fs *s3FS) GetQuota(ctx context.Context) (uint64, uint64, error) {
 	return 0, 0, nil
 }
 
@@ -448,7 +474,7 @@ func (fs *s3FS) Move(ctx context.Context, oldRef, newRef *provider.Reference) er
 	return nil
 }
 
-func (fs *s3FS) GetMD(ctx context.Context, ref *provider.Reference) (*provider.ResourceInfo, error) {
+func (fs *s3FS) GetMD(ctx context.Context, ref *provider.Reference, mdKeys []string) (*provider.ResourceInfo, error) {
 	log := appctx.GetLogger(ctx)
 
 	fn, err := fs.resolve(ctx, ref)
@@ -478,7 +504,7 @@ func (fs *s3FS) GetMD(ctx context.Context, ref *provider.Reference) (*provider.R
 		log.Debug().
 			Str("fn", fn).
 			Msg("trying to list prefix")
-		//try by listing parent to find directory
+		// try by listing parent to find directory
 		input := &s3.ListObjectsV2Input{
 			Bucket:    aws.String(fs.config.Bucket),
 			Prefix:    aws.String(fn),
@@ -492,13 +518,13 @@ func (fs *s3FS) GetMD(ctx context.Context, ref *provider.Reference) (*provider.R
 				return nil, errors.Wrap(err, "s3FS: error listing "+fn)
 			}
 
-			for _, o := range output.CommonPrefixes {
+			for i := range output.CommonPrefixes {
 				log.Debug().
-					Interface("object", *o).
+					Interface("object", output.CommonPrefixes[i]).
 					Str("fn", fn).
 					Msg("found CommonPrefix")
-				if *o.Prefix == fn+"/" {
-					return fs.normalizeCommonPrefix(ctx, o), nil
+				if *output.CommonPrefixes[i].Prefix == fn+"/" {
+					return fs.normalizeCommonPrefix(ctx, output.CommonPrefixes[i]), nil
 				}
 			}
 
@@ -511,7 +537,7 @@ func (fs *s3FS) GetMD(ctx context.Context, ref *provider.Reference) (*provider.R
 	return fs.normalizeHead(ctx, output, fn), nil
 }
 
-func (fs *s3FS) ListFolder(ctx context.Context, ref *provider.Reference) ([]*provider.ResourceInfo, error) {
+func (fs *s3FS) ListFolder(ctx context.Context, ref *provider.Reference, mdKeys []string) ([]*provider.ResourceInfo, error) {
 	fn, err := fs.resolve(ctx, ref)
 	if err != nil {
 		return nil, errors.Wrap(err, "error resolving ref")
@@ -532,12 +558,12 @@ func (fs *s3FS) ListFolder(ctx context.Context, ref *provider.Reference) ([]*pro
 			return nil, errors.Wrap(err, "s3FS: error listing "+fn)
 		}
 
-		for _, p := range output.CommonPrefixes {
-			finfos = append(finfos, fs.normalizeCommonPrefix(ctx, p))
+		for i := range output.CommonPrefixes {
+			finfos = append(finfos, fs.normalizeCommonPrefix(ctx, output.CommonPrefixes[i]))
 		}
 
-		for _, o := range output.Contents {
-			finfos = append(finfos, fs.normalizeObject(ctx, o, *o.Key))
+		for i := range output.Contents {
+			finfos = append(finfos, fs.normalizeObject(ctx, output.Contents[i], *output.Contents[i].Key))
 		}
 
 		input.ContinuationToken = output.NextContinuationToken
@@ -630,6 +656,6 @@ func (fs *s3FS) ListRecycle(ctx context.Context) ([]*provider.RecycleItem, error
 	return nil, errtypes.NotSupported("list recycle")
 }
 
-func (fs *s3FS) RestoreRecycleItem(ctx context.Context, restoreKey string) error {
+func (fs *s3FS) RestoreRecycleItem(ctx context.Context, restoreKey, restorePath string) error {
 	return errtypes.NotSupported("restore recycle")
 }

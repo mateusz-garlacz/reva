@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,28 +20,30 @@ package main
 
 import (
 	"fmt"
-	"os"
+	"io"
 
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	collaboration "github.com/cs3org/go-cs3apis/cs3/sharing/collaboration/v1beta1"
+	"github.com/pkg/errors"
 )
 
 func shareUpdateCommand() *command {
 	cmd := newCommand("share-update")
-	cmd.Description = func() string { return "update share" }
-	cmd.Usage = func() string { return "Usage: share update [-flags] <share_id>" }
+	cmd.Description = func() string { return "update a share" }
+	cmd.Usage = func() string { return "Usage: share-update [-flags] <share_id>" }
 	rol := cmd.String("rol", "viewer", "the permission for the share (viewer or editor)")
-	cmd.Action = func() error {
+
+	cmd.ResetFlags = func() {
+		*rol = "viewer"
+	}
+	cmd.Action = func(w ...io.Writer) error {
 		if cmd.NArg() < 1 {
-			fmt.Println(cmd.Usage())
-			os.Exit(1)
+			return errors.New("Invalid arguments: " + cmd.Usage())
 		}
 
 		// validate flags
-		if *rol != "viewer" && *rol != "editor" {
-			fmt.Println("invalid rol: rol must be viewer or editor")
-			fmt.Println(cmd.Usage())
-			os.Exit(1)
+		if *rol != viewerPermission && *rol != editorPermission {
+			return errors.New("Invalid rol: rol must be viewer or editor\n" + cmd.Usage())
 		}
 
 		id := cmd.Args()[0]
@@ -67,7 +69,9 @@ func shareUpdateCommand() *command {
 			},
 			Field: &collaboration.UpdateShareRequest_UpdateField{
 				Field: &collaboration.UpdateShareRequest_UpdateField_Permissions{
-					Permissions: perm,
+					Permissions: &collaboration.SharePermissions{
+						Permissions: perm,
+					},
 				},
 			},
 		}

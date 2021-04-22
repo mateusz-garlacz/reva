@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,19 +21,21 @@ package logger
 import (
 	"io"
 	"os"
+	"time"
 
 	"github.com/rs/zerolog"
 )
 
 func init() {
 	zerolog.CallerSkipFrameCount = 2
+	zerolog.TimeFieldFormat = time.RFC3339Nano
 }
 
 // Mode changes the logging format.
 type Mode string
 
 const (
-	//JSONMode outputs JSON.
+	// JSONMode outputs JSON.
 	JSONMode Mode = "json"
 	// ConsoleMode outputs human-readable logs.
 	ConsoleMode Mode = "console"
@@ -64,7 +66,7 @@ func WithLevel(lvl string) Option {
 func WithWriter(w io.Writer, m Mode) Option {
 	return func(l *zerolog.Logger) {
 		if m == ConsoleMode {
-			*l = l.Output(zerolog.ConsoleWriter{Out: w})
+			*l = l.Output(zerolog.ConsoleWriter{Out: w, TimeFormat: "2006-01-02 15:04:05.999"})
 		} else {
 			*l = l.Output(w)
 		}

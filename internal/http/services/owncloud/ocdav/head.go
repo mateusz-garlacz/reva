@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,24 +19,33 @@
 package ocdav
 
 import (
+	"fmt"
 	"net/http"
 	"path"
+	"strconv"
+	"strings"
 	"time"
 
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
-	"github.com/cs3org/reva/internal/http/utils"
+	"github.com/cs3org/reva/internal/grpc/services/storageprovider"
 	"github.com/cs3org/reva/pkg/appctx"
+	"github.com/cs3org/reva/pkg/utils"
+	"go.opencensus.io/trace"
 )
 
-func (s *svc) doHead(w http.ResponseWriter, r *http.Request, ns string) {
+func (s *svc) handleHead(w http.ResponseWriter, r *http.Request, ns string) {
 	ctx := r.Context()
-	log := appctx.GetLogger(ctx)
+	ctx, span := trace.StartSpan(ctx, "head")
+	defer span.End()
+
 	fn := path.Join(ns, r.URL.Path)
+
+	sublog := appctx.GetLogger(ctx).With().Str("path", fn).Logger()
 
 	client, err := s.getClient()
 	if err != nil {
-		log.Error().Err(err).Msg("error getting grpc client")
+		sublog.Error().Err(err).Msg("error getting grpc client")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -47,14 +56,13 @@ func (s *svc) doHead(w http.ResponseWriter, r *http.Request, ns string) {
 	req := &provider.StatRequest{Ref: ref}
 	res, err := client.Stat(ctx, req)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending grpc stat request")
+		sublog.Error().Err(err).Msg("error sending grpc stat request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	if res.Status.Code != rpc.Code_CODE_OK {
-		log.Error().Msgf("error calling grpc: %s", res.Status.String())
-		w.WriteHeader(http.StatusInternalServerError)
+		HandleErrorStatus(&sublog, w, res.Status)
 		return
 	}
 
@@ -63,8 +71,15 @@ func (s *svc) doHead(w http.ResponseWriter, r *http.Request, ns string) {
 	w.Header().Set("ETag", info.Etag)
 	w.Header().Set("OC-FileId", wrapResourceID(info.Id))
 	w.Header().Set("OC-ETag", info.Etag)
-	t := utils.TSToTime(info.Mtime)
-	lastModifiedString := t.Format(time.RFC1123)
+	if info.Checksum != nil {
+		w.Header().Set("OC-Checksum", fmt.Sprintf("%s:%s", strings.ToUpper(string(storageprovider.GRPC2PKGXS(info.Checksum.Type))), info.Checksum.Sum))
+	}
+	t := utils.TSToTime(info.Mtime).UTC()
+	lastModifiedString := t.Format(time.RFC1123Z)
 	w.Header().Set("Last-Modified", lastModifiedString)
+	w.Header().Set("Content-Length", strconv.FormatUint(info.Size, 10))
+	if info.Type != provider.ResourceType_RESOURCE_TYPE_CONTAINER {
+		w.Header().Set("Accept-Ranges", "bytes")
+	}
 	w.WriteHeader(http.StatusOK)
 }

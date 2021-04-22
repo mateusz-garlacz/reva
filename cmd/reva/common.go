@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,8 +26,17 @@ import (
 	"path"
 	"strings"
 
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 )
+
+const (
+	viewerPermission string = "viewer"
+	editorPermission string = "editor"
+)
+
+type config struct {
+	Host string `json:"host"`
+}
 
 func getConfigFile() string {
 	user, err := gouser.Current()
@@ -36,30 +45,6 @@ func getConfigFile() string {
 	}
 
 	return path.Join(user.HomeDir, ".reva.config")
-}
-
-func getTokenFile() string {
-	user, err := gouser.Current()
-	if err != nil {
-		panic(err)
-	}
-
-	return path.Join(user.HomeDir, ".reva-token")
-}
-
-func writeToken(token string) {
-	err := ioutil.WriteFile(getTokenFile(), []byte(token), 0600)
-	if err != nil {
-		panic(err)
-	}
-}
-
-func readToken() (string, error) {
-	data, err := ioutil.ReadFile(getTokenFile())
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
 }
 
 func readConfig() (*config, error) {
@@ -84,8 +69,28 @@ func writeConfig(c *config) error {
 	return ioutil.WriteFile(getConfigFile(), data, 0600)
 }
 
-type config struct {
-	Host string `json:"host"`
+func getTokenFile() string {
+	user, err := gouser.Current()
+	if err != nil {
+		panic(err)
+	}
+
+	return path.Join(user.HomeDir, ".reva-token")
+}
+
+func readToken() (string, error) {
+	data, err := ioutil.ReadFile(getTokenFile())
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func writeToken(token string) {
+	err := ioutil.WriteFile(getTokenFile(), []byte(token), 0600)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func read(r *bufio.Reader) (string, error) {
@@ -96,7 +101,7 @@ func read(r *bufio.Reader) (string, error) {
 	return strings.TrimSpace(text), nil
 }
 func readPassword(fd int) (string, error) {
-	bytePassword, err := terminal.ReadPassword(fd)
+	bytePassword, err := term.ReadPassword(fd)
 	if err != nil {
 		return "", err
 	}

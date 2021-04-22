@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 	link "github.com/cs3org/go-cs3apis/cs3/sharing/link/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
 	"github.com/cs3org/reva/pkg/appctx"
+	"github.com/cs3org/reva/pkg/errtypes"
 	"github.com/cs3org/reva/pkg/publicshare"
 	"github.com/cs3org/reva/pkg/publicshare/manager/registry"
 	"github.com/cs3org/reva/pkg/rgrpc"
@@ -44,6 +45,12 @@ type config struct {
 	Drivers map[string]map[string]interface{} `mapstructure:"drivers"`
 }
 
+func (c *config) init() {
+	if c.Driver == "" {
+		c.Driver = "json"
+	}
+}
+
 type service struct {
 	conf *config
 	sm   publicshare.Manager
@@ -61,7 +68,7 @@ func (s *service) Close() error {
 	return nil
 }
 func (s *service) UnprotectedEndpoints() []string {
-	return []string{}
+	return []string{"/cs3.sharing.link.v1beta1.LinkAPI/GetPublicShareByToken"}
 }
 
 func (s *service) Register(ss *grpc.Server) {
@@ -85,6 +92,8 @@ func New(m map[string]interface{}, ss *grpc.Server) (rgrpc.Service, error) {
 		return nil, err
 	}
 
+	c.init()
+
 	sm, err := getShareManager(c)
 	if err != nil {
 		return nil, err
@@ -100,7 +109,7 @@ func New(m map[string]interface{}, ss *grpc.Server) (rgrpc.Service, error) {
 
 func (s *service) CreatePublicShare(ctx context.Context, req *link.CreatePublicShareRequest) (*link.CreatePublicShareResponse, error) {
 	log := appctx.GetLogger(ctx)
-	log.Info().Msg("create public share")
+	log.Info().Str("publicshareprovider", "create").Msg("create public share")
 
 	u, ok := user.ContextGetUser(ctx)
 	if !ok {
@@ -121,8 +130,15 @@ func (s *service) CreatePublicShare(ctx context.Context, req *link.CreatePublicS
 
 func (s *service) RemovePublicShare(ctx context.Context, req *link.RemovePublicShareRequest) (*link.RemovePublicShareResponse, error) {
 	log := appctx.GetLogger(ctx)
-	log.Info().Msg("remove public share")
+	log.Info().Str("publicshareprovider", "remove").Msg("remove public share")
 
+	user := user.ContextMustGetUser(ctx)
+	err := s.sm.RevokePublicShare(ctx, user, req.Ref)
+	if err != nil {
+		return &link.RemovePublicShareResponse{
+			Status: status.NewInternal(ctx, err, "error deleting public share"),
+		}, err
+	}
 	return &link.RemovePublicShareResponse{
 		Status: status.NewOK(ctx),
 	}, nil
@@ -130,29 +146,57 @@ func (s *service) RemovePublicShare(ctx context.Context, req *link.RemovePublicS
 
 func (s *service) GetPublicShareByToken(ctx context.Context, req *link.GetPublicShareByTokenRequest) (*link.GetPublicShareByTokenResponse, error) {
 	log := appctx.GetLogger(ctx)
-	log.Info().Msg("remove public share")
+	log.Debug().Msg("getting public share by token")
 
-	return &link.GetPublicShareByTokenResponse{
-		Status: status.NewOK(ctx),
-	}, nil
+	// there are 2 passes here, and the second request has no password
+	found, err := s.sm.GetPublicShareByToken(ctx, req.GetToken(), req.GetAuthentication(), req.GetSign())
+	switch v := err.(type) {
+	case nil:
+		return &link.GetPublicShareByTokenResponse{
+			Status: status.NewOK(ctx),
+			Share:  found,
+		}, nil
+	case errtypes.InvalidCredentials:
+		return &link.GetPublicShareByTokenResponse{
+			Status: status.NewPermissionDenied(ctx, v, "wrong password"),
+		}, nil
+	case errtypes.NotFound:
+		return &link.GetPublicShareByTokenResponse{
+			Status: status.NewNotFound(ctx, "unknown token"),
+		}, nil
+	default:
+		return &link.GetPublicShareByTokenResponse{
+			Status: status.NewInternal(ctx, v, "unexpected error"),
+		}, nil
+	}
 }
 
 func (s *service) GetPublicShare(ctx context.Context, req *link.GetPublicShareRequest) (*link.GetPublicShareResponse, error) {
 	log := appctx.GetLogger(ctx)
-	log.Info().Msg("get public share")
+	log.Info().Str("publicshareprovider", "get").Msg("get public share")
+
+	u, ok := user.ContextGetUser(ctx)
+	if !ok {
+		log.Error().Msg("error getting user from context")
+	}
+
+	found, err := s.sm.GetPublicShare(ctx, u, req.Ref, req.GetSign())
+	if err != nil {
+		return nil, err
+	}
 
 	return &link.GetPublicShareResponse{
 		Status: status.NewOK(ctx),
-		// Share:  share,
+		Share:  found,
 	}, nil
 }
 
 func (s *service) ListPublicShares(ctx context.Context, req *link.ListPublicSharesRequest) (*link.ListPublicSharesResponse, error) {
 	log := appctx.GetLogger(ctx)
-	log.Info().Msg("list public share")
+	log.Info().Str("publicshareprovider", "list").Msg("list public share")
 	user, _ := user.ContextGetUser(ctx)
 
-	shares, err := s.sm.ListPublicShares(ctx, user, &provider.ResourceInfo{})
+	shares, err := s.sm.ListPublicShares(ctx, user, req.Filters, &provider.ResourceInfo{}, req.GetSign())
 	if err != nil {
 		log.Err(err).Msg("error listing shares")
 		return &link.ListPublicSharesResponse{
@@ -169,10 +213,21 @@ func (s *service) ListPublicShares(ctx context.Context, req *link.ListPublicShar
 
 func (s *service) UpdatePublicShare(ctx context.Context, req *link.UpdatePublicShareRequest) (*link.UpdatePublicShareResponse, error) {
 	log := appctx.GetLogger(ctx)
-	log.Info().Msg("list public share")
+	log.Info().Str("publicshareprovider", "update").Msg("update public share")
+
+	u, ok := user.ContextGetUser(ctx)
+	if !ok {
+		log.Error().Msg("error getting user from context")
+	}
+
+	updateR, err := s.sm.UpdatePublicShare(ctx, u, req, nil)
+	if err != nil {
+		log.Err(err).Msgf("error updating public shares: %v", err)
+	}
 
 	res := &link.UpdatePublicShareResponse{
 		Status: status.NewOK(ctx),
+		Share:  updateR,
 	}
 	return res, nil
 }

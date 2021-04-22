@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -59,12 +59,20 @@ type config struct {
 	Drivers map[string]map[string]interface{} `mapstructure:"drivers"`
 }
 
+func (c *config) init() {
+	if c.Driver == "" {
+		c.Driver = "static"
+	}
+}
+
 // New creates a new AuthRegistry
 func New(m map[string]interface{}, ss *grpc.Server) (rgrpc.Service, error) {
 	c, err := parseConfig(m)
 	if err != nil {
 		return nil, err
 	}
+
+	c.init()
 
 	reg, err := getRegistry(c)
 	if err != nil {

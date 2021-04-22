@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ func handler(log zerolog.Logger, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		// trace is set on the httpserver.go file as the outermost wraper handler.
+		// trace is set on the httpserver.go file as the outermost wrapper handler.
 		span := trace.FromContext(ctx)
 		sub := log.With().Str("traceid", span.SpanContext().TraceID.String()).Logger()
 		ctx = appctx.WithLogger(ctx, &sub)

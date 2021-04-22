@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 
 	provider "github.com/cs3org/go-cs3apis/cs3/auth/provider/v1beta1"
 	registry "github.com/cs3org/go-cs3apis/cs3/auth/registry/v1beta1"
@@ -31,6 +32,7 @@ import (
 	"github.com/cs3org/reva/pkg/rgrpc/status"
 	"github.com/cs3org/reva/pkg/rgrpc/todo/pool"
 	tokenpkg "github.com/cs3org/reva/pkg/token"
+	userpkg "github.com/cs3org/reva/pkg/user"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc/metadata"
 )
@@ -52,18 +54,24 @@ func (s *svc) Authenticate(ctx context.Context, req *gateway.AuthenticateRequest
 		ClientSecret: req.ClientSecret,
 	}
 	res, err := c.Authenticate(ctx, authProviderReq)
-	if err != nil {
-		log.Err(err).Msgf("gateway: error calling Authenticate for type: %s", req.Type)
+	switch {
+	case err != nil:
 		return &gateway.AuthenticateResponse{
-			Status: status.NewUnauthenticated(ctx, err, "error authenticating request"),
+			Status: status.NewInternal(ctx, err, fmt.Sprintf("gateway: error calling Authenticate for type: %s", req.Type)),
 		}, nil
-	}
-
-	if res.Status.Code != rpc.Code_CODE_OK {
-		err := status.NewErrorFromCode(res.Status.Code, "gateway")
-		log.Err(err).Msgf("error authenticating credentials to auth provider for type: %s", req.Type)
+	case res.Status.Code == rpc.Code_CODE_PERMISSION_DENIED:
+		fallthrough
+	case res.Status.Code == rpc.Code_CODE_UNAUTHENTICATED:
+		fallthrough
+	case res.Status.Code == rpc.Code_CODE_NOT_FOUND:
+		// normal failures, no need to log
 		return &gateway.AuthenticateResponse{
-			Status: status.NewUnauthenticated(ctx, err, ""),
+			Status: res.Status,
+		}, nil
+	case res.Status.Code != rpc.Code_CODE_OK:
+		err := status.NewErrorFromCode(res.Status.Code, "gateway")
+		return &gateway.AuthenticateResponse{
+			Status: status.NewInternal(ctx, err, fmt.Sprintf("error authenticating credentials to auth provider for type: %s", req.Type)),
 		}, nil
 	}
 
@@ -108,11 +116,11 @@ func (s *svc) Authenticate(ctx context.Context, req *gateway.AuthenticateRequest
 	// we need to pass the token to authenticate the CreateHome request.
 	// TODO(labkode): appending to existing context will not pass the token.
 	ctx = tokenpkg.ContextSetToken(ctx, token)
+	ctx = userpkg.ContextSetUser(ctx, user)
 	ctx = metadata.AppendToOutgoingContext(ctx, tokenpkg.TokenHeader, token) // TODO(jfd): hardcoded metadata key. use  PerRPCCredentials?
 
 	// create home directory
-	createHomeReq := &storageprovider.CreateHomeRequest{}
-	createHomeRes, err := s.CreateHome(ctx, createHomeReq)
+	createHomeRes, err := s.CreateHome(ctx, &storageprovider.CreateHomeRequest{})
 	if err != nil {
 		log.Err(err).Msg("error calling CreateHome")
 		return &gateway.AuthenticateResponse{

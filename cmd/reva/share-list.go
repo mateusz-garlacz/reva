@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,9 @@
 package main
 
 import (
+	"encoding/gob"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -35,7 +37,12 @@ func shareListCommand() *command {
 	cmd.Description = func() string { return "list shares you manage" }
 	cmd.Usage = func() string { return "Usage: share-list [-flags]" }
 	resID := cmd.String("by-resource-id", "", "filter by resource id (storage_id:opaque_id)")
-	cmd.Action = func() error {
+
+	cmd.ResetFlags = func() {
+		*resID = ""
+	}
+
+	cmd.Action = func(w ...io.Writer) error {
 		ctx := getAuthContext()
 		shareClient, err := getClient()
 		if err != nil {
@@ -72,16 +79,32 @@ func shareListCommand() *command {
 			return formatError(shareRes.Status)
 		}
 
-		t := table.NewWriter()
-		t.SetOutputMirror(os.Stdout)
-		t.AppendHeader(table.Row{"#", "Owner.Idp", "Owner.OpaqueId", "ResourceId", "Permissions", "Type", "Grantee.Idp", "Grantee.OpaqueId", "Created", "Updated"})
+		if len(w) == 0 {
+			t := table.NewWriter()
+			t.SetOutputMirror(os.Stdout)
+			t.AppendHeader(table.Row{"#", "Owner.Idp", "Owner.OpaqueId", "ResourceId", "Permissions", "Type",
+				"Grantee.Idp", "Grantee.OpaqueId", "Created", "Updated"})
 
-		for _, s := range shareRes.Shares {
-			t.AppendRows([]table.Row{
-				{s.Id.OpaqueId, s.Owner.Idp, s.Owner.OpaqueId, s.ResourceId.String(), s.Permissions.String(), s.Grantee.Type.String(), s.Grantee.Id.Idp, s.Grantee.Id.OpaqueId, time.Unix(int64(s.Ctime.Seconds), 0), time.Unix(int64(s.Mtime.Seconds), 0)},
-			})
+			for _, s := range shareRes.Shares {
+				var idp, opaque string
+				if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_USER {
+					idp, opaque = s.Grantee.GetUserId().Idp, s.Grantee.GetUserId().OpaqueId
+				} else if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_GROUP {
+					idp, opaque = s.Grantee.GetGroupId().Idp, s.Grantee.GetGroupId().OpaqueId
+				}
+				t.AppendRows([]table.Row{
+					{s.Id.OpaqueId, s.Owner.Idp, s.Owner.OpaqueId, s.ResourceId.String(), s.Permissions.String(),
+						s.Grantee.Type.String(), idp, opaque,
+						time.Unix(int64(s.Ctime.Seconds), 0), time.Unix(int64(s.Mtime.Seconds), 0)},
+				})
+			}
+			t.Render()
+		} else {
+			enc := gob.NewEncoder(w[0])
+			if err := enc.Encode(shareRes.Shares); err != nil {
+				return err
+			}
 		}
-		t.Render()
 		return nil
 	}
 	return cmd

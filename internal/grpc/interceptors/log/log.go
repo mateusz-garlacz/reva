@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -57,7 +57,7 @@ func NewUnary() grpc.UnaryServerInterceptor {
 		if code != codes.OK {
 			event = log.Error()
 		} else {
-			event = log.Info()
+			event = log.Debug()
 		}
 
 		event.Str("user-agent", userAgent).

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,34 +24,56 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 
-	"github.com/cheggaaa/pb"
+	"github.com/cs3org/reva/internal/http/services/datagateway"
+	"github.com/pkg/errors"
+
+	gateway "github.com/cs3org/go-cs3apis/cs3/gateway/v1beta1"
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
+	typespb "github.com/cs3org/go-cs3apis/cs3/types/v1beta1"
+	"github.com/cs3org/reva/pkg/errtypes"
+	tokenpkg "github.com/cs3org/reva/pkg/token"
+	"github.com/eventials/go-tus"
+	"github.com/eventials/go-tus/memorystore"
+	"github.com/studio-b12/gowebdav"
 
 	// TODO(labkode): this should not come from this package.
 	"github.com/cs3org/reva/internal/grpc/services/storageprovider"
 	"github.com/cs3org/reva/pkg/crypto"
 	"github.com/cs3org/reva/pkg/rhttp"
+	"github.com/cs3org/reva/pkg/utils"
 )
 
 func uploadCommand() *command {
 	cmd := newCommand("upload")
 	cmd.Description = func() string { return "upload a local file to the remote server" }
 	cmd.Usage = func() string { return "Usage: upload [-flags] <file_name> <remote_target>" }
+	protocolFlag := cmd.String("protocol", "tus", "the protocol to be used for uploads")
 	xsFlag := cmd.String("xs", "negotiate", "compute checksum")
-	cmd.Action = func() error {
+
+	cmd.ResetFlags = func() {
+		*protocolFlag, *xsFlag = "tus", "negotiate"
+	}
+
+	cmd.Action = func(w ...io.Writer) error {
 		ctx := getAuthContext()
 
 		if cmd.NArg() < 2 {
-			fmt.Println(cmd.Usage())
-			os.Exit(1)
+			return errors.New("Invalid arguments: " + cmd.Usage())
 		}
 
 		fn := cmd.Args()[0]
 		target := cmd.Args()[1]
 
-		fd, err := os.Open(fn)
+		absPath, err := utils.ResolvePath(fn)
+		if err != nil {
+			return err
+		}
+
+		fd, err := os.Open(absPath)
 		if err != nil {
 			return err
 		}
@@ -61,11 +83,10 @@ func uploadCommand() *command {
 		if err != nil {
 			return err
 		}
-		defer fd.Close()
 
 		fmt.Printf("Local file size: %d bytes\n", md.Size())
 
-		client, err := getClient()
+		gwc, err := getClient()
 		if err != nil {
 			return err
 		}
@@ -76,9 +97,17 @@ func uploadCommand() *command {
 					Path: target,
 				},
 			},
+			Opaque: &typespb.Opaque{
+				Map: map[string]*typespb.OpaqueEntry{
+					"Upload-Length": {
+						Decoder: "plain",
+						Value:   []byte(strconv.FormatInt(md.Size(), 10)),
+					},
+				},
+			},
 		}
 
-		res, err := client.InitiateFileUpload(ctx, req)
+		res, err := gwc.InitiateFileUpload(ctx, req)
 		if err != nil {
 			return err
 		}
@@ -87,11 +116,23 @@ func uploadCommand() *command {
 			return formatError(res.Status)
 		}
 
-		// TODO(labkode): upload to data server
-		fmt.Printf("Data server: %s\n", res.UploadEndpoint)
-		fmt.Printf("Allowed checksums: %+v\n", res.AvailableChecksums)
+		if err = checkUploadWebdavRef(res.Protocols, md, fd); err != nil {
+			if _, ok := err.(errtypes.IsNotSupported); !ok {
+				return err
+			}
+		} else {
+			return nil
+		}
 
-		xsType, err := guessXS(*xsFlag, res.AvailableChecksums)
+		p, err := getUploadProtocolInfo(res.Protocols, *protocolFlag)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Data server: %s\n", p.UploadEndpoint)
+		fmt.Printf("Allowed checksums: %+v\n", p.AvailableChecksums)
+
+		xsType, err := guessXS(*xsFlag, p.AvailableChecksums)
 		if err != nil {
 			return err
 		}
@@ -108,34 +149,66 @@ func uploadCommand() *command {
 			return err
 		}
 
-		dataServerURL := res.UploadEndpoint
-		bar := pb.New(int(md.Size())).SetUnits(pb.U_BYTES)
-		bar.Start()
-		reader := bar.NewProxyReader(fd)
+		dataServerURL := p.UploadEndpoint
 
-		httpReq, err := rhttp.NewRequest(ctx, "PUT", dataServerURL, reader)
-		if err != nil {
-			return err
-		}
+		if *protocolFlag == "simple" {
+			httpReq, err := rhttp.NewRequest(ctx, "PUT", dataServerURL, fd)
+			if err != nil {
+				return err
+			}
 
-		httpReq.Header.Set("X-Reva-Transfer", res.Token)
-		q := httpReq.URL.Query()
-		q.Add("xs", xs)
-		q.Add("xs_type", storageprovider.GRPC2PKGXS(xsType).String())
-		httpReq.URL.RawQuery = q.Encode()
+			httpReq.Header.Set(datagateway.TokenTransportHeader, p.Token)
+			q := httpReq.URL.Query()
+			q.Add("xs", xs)
+			q.Add("xs_type", storageprovider.GRPC2PKGXS(xsType).String())
+			httpReq.URL.RawQuery = q.Encode()
 
-		httpClient := rhttp.GetHTTPClient(ctx)
+			httpRes, err := client.Do(httpReq)
+			if err != nil {
+				return err
+			}
+			defer httpRes.Body.Close()
+			if httpRes.StatusCode != http.StatusOK {
+				return errors.New("upload: PUT request returned " + httpRes.Status)
+			}
+		} else {
+			// create the tus client.
+			c := tus.DefaultConfig()
+			c.Resume = true
+			c.HttpClient = client
+			c.Store, err = memorystore.NewMemoryStore()
+			if err != nil {
+				return err
+			}
+			if token, ok := tokenpkg.ContextGetToken(ctx); ok {
+				c.Header.Add(tokenpkg.TokenHeader, token)
+			}
+			c.Header.Add(datagateway.TokenTransportHeader, p.Token)
+			tusc, err := tus.NewClient(dataServerURL, c)
+			if err != nil {
+				return err
+			}
 
-		httpRes, err := httpClient.Do(httpReq)
-		if err != nil {
-			return err
-		}
-		defer httpRes.Body.Close()
+			metadata := map[string]string{
+				"filename": filepath.Base(target),
+				"dir":      filepath.Dir(target),
+				"checksum": fmt.Sprintf("%s %s", storageprovider.GRPC2PKGXS(xsType).String(), xs),
+			}
 
-		bar.Finish()
+			fingerprint := fmt.Sprintf("%s-%d-%s-%s", md.Name(), md.Size(), md.ModTime(), xs)
 
-		if httpRes.StatusCode != http.StatusOK {
-			return err
+			// create an upload from a file.
+			upload := tus.NewUpload(fd, md.Size(), metadata, fingerprint)
+
+			// create the uploader.
+			c.Store.Set(upload.Fingerprint, dataServerURL)
+			uploader := tus.NewUploader(tusc, dataServerURL, upload, 0)
+
+			// start the uploading process.
+			err = uploader.Upload()
+			if err != nil {
+				return err
+			}
 		}
 
 		req2 := &provider.StatRequest{
@@ -145,7 +218,7 @@ func uploadCommand() *command {
 				},
 			},
 		}
-		res2, err := client.Stat(ctx, req2)
+		res2, err := gwc.Stat(ctx, req2)
 		if err != nil {
 			return err
 		}
@@ -161,6 +234,61 @@ func uploadCommand() *command {
 		return nil
 	}
 	return cmd
+}
+
+func getUploadProtocolInfo(protocolInfos []*gateway.FileUploadProtocol, protocol string) (*gateway.FileUploadProtocol, error) {
+	for _, p := range protocolInfos {
+		if p.Protocol == protocol {
+			return p, nil
+		}
+	}
+	return nil, errtypes.NotFound(protocol)
+}
+
+func checkUploadWebdavRef(protocols []*gateway.FileUploadProtocol, md os.FileInfo, fd *os.File) error {
+	p, err := getUploadProtocolInfo(protocols, "simple")
+	if err != nil {
+		return err
+	}
+
+	if p.Opaque == nil {
+		return errtypes.NotSupported("opaque object not defined")
+	}
+
+	var token string
+	tokenOpaque, ok := p.Opaque.Map["webdav-token"]
+	if !ok {
+		return errtypes.NotSupported("webdav token not defined")
+	}
+	switch tokenOpaque.Decoder {
+	case "plain":
+		token = string(tokenOpaque.Value)
+	default:
+		return errors.New("opaque entry decoder not recognized: " + tokenOpaque.Decoder)
+	}
+
+	var filePath string
+	fileOpaque, ok := p.Opaque.Map["webdav-file-path"]
+	if !ok {
+		return errtypes.NotSupported("webdav file path not defined")
+	}
+	switch fileOpaque.Decoder {
+	case "plain":
+		filePath = string(fileOpaque.Value)
+	default:
+		return errors.New("opaque entry decoder not recognized: " + fileOpaque.Decoder)
+	}
+
+	c := gowebdav.NewClient(p.UploadEndpoint, "", "")
+	c.SetHeader(tokenpkg.TokenHeader, token)
+	c.SetHeader("Upload-Length", strconv.FormatInt(md.Size(), 10))
+
+	if err = c.WriteStream(filePath, fd, 0700); err != nil {
+		return err
+	}
+
+	fmt.Println("File uploaded")
+	return nil
 }
 
 func computeXS(t provider.ResourceChecksumType, r io.Reader) (string, error) {
@@ -180,7 +308,7 @@ func computeXS(t provider.ResourceChecksumType, r io.Reader) (string, error) {
 }
 
 func guessXS(xsFlag string, availableXS []*provider.ResourceChecksumPriority) (provider.ResourceChecksumType, error) {
-	// force use of cheksum if available server side.
+	// force use of checksum if available server side.
 	if xsFlag != "negotiate" {
 		wanted := storageprovider.PKG2GRPCXS(xsFlag)
 		if wanted == provider.ResourceChecksumType_RESOURCE_CHECKSUM_TYPE_INVALID {

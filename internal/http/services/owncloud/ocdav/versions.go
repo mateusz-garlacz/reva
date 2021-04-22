@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import (
 	types "github.com/cs3org/go-cs3apis/cs3/types/v1beta1"
 	"github.com/cs3org/reva/pkg/appctx"
 	"github.com/cs3org/reva/pkg/rhttp/router"
+	"go.opencensus.io/trace"
 )
 
 // VersionsHandler handles version requests
@@ -45,6 +46,11 @@ func (h *VersionsHandler) Handler(s *svc, rid *provider.ResourceId) http.Handler
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
+		if rid == (*provider.ResourceId)(nil) {
+			http.Error(w, "404 Not Found", http.StatusNotFound)
+			return
+		}
+
 		// baseURI is encoded as part of the response payload in href field
 		baseURI := path.Join(ctx.Value(ctxKeyBaseURI).(string), wrapResourceID(rid))
 		ctx = context.WithValue(ctx, ctxKeyBaseURI, baseURI)
@@ -53,7 +59,7 @@ func (h *VersionsHandler) Handler(s *svc, rid *provider.ResourceId) http.Handler
 		var key string
 		key, r.URL.Path = router.ShiftPath(r.URL.Path)
 		if r.Method == http.MethodOptions {
-			s.doOptions(w, r, "versions")
+			s.handleOptions(w, r, "versions")
 			return
 		}
 		if key == "" && r.Method == "PROPFIND" {
@@ -74,18 +80,21 @@ func (h *VersionsHandler) Handler(s *svc, rid *provider.ResourceId) http.Handler
 
 func (h *VersionsHandler) doListVersions(w http.ResponseWriter, r *http.Request, s *svc, rid *provider.ResourceId) {
 	ctx := r.Context()
-	log := appctx.GetLogger(ctx)
+	ctx, span := trace.StartSpan(ctx, "listVersions")
+	defer span.End()
+
+	sublog := appctx.GetLogger(ctx).With().Interface("resourceid", rid).Logger()
 
 	pf, status, err := readPropfind(r.Body)
 	if err != nil {
-		log.Error().Err(err).Msg("error reading propfind request")
+		sublog.Debug().Err(err).Msg("error reading propfind request")
 		w.WriteHeader(status)
 		return
 	}
 
 	client, err := s.getClient()
 	if err != nil {
-		log.Error().Err(err).Msg("error getting grpc client")
+		sublog.Error().Err(err).Msg("error getting grpc client")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -96,16 +105,12 @@ func (h *VersionsHandler) doListVersions(w http.ResponseWriter, r *http.Request,
 	req := &provider.StatRequest{Ref: ref}
 	res, err := client.Stat(ctx, req)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending a grpc stat request")
+		sublog.Error().Err(err).Msg("error sending a grpc stat request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	if res.Status.Code != rpc.Code_CODE_OK {
-		if res.Status.Code == rpc.Code_CODE_NOT_FOUND {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
+		HandleErrorStatus(&sublog, w, res.Status)
 		return
 	}
 
@@ -116,50 +121,40 @@ func (h *VersionsHandler) doListVersions(w http.ResponseWriter, r *http.Request,
 	}
 	lvRes, err := client.ListFileVersions(ctx, lvReq)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending list container grpc request")
+		sublog.Error().Err(err).Msg("error sending list container grpc request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	if lvRes.Status.Code != rpc.Code_CODE_OK {
-		w.WriteHeader(http.StatusInternalServerError)
+		HandleErrorStatus(&sublog, w, lvRes.Status)
 		return
 	}
+
 	versions := lvRes.GetVersions()
 	infos := make([]*provider.ResourceInfo, 0, len(versions)+1)
 	// add version dir . entry, derived from file info
 	infos = append(infos, &provider.ResourceInfo{
 		Type: provider.ResourceType_RESOURCE_TYPE_CONTAINER,
-		Id: &provider.ResourceId{
-			StorageId: "virtual", // this is a virtual storage
-			OpaqueId:  path.Join("meta", wrapResourceID(rid), "v"),
-		},
-		Etag:     info.Etag,
-		MimeType: "httpd/unix-directory",
-		Mtime:    info.Mtime,
-		Path:     "v",
-		//PermissionSet
-		Size:  0,
-		Owner: info.Owner,
 	})
 
 	for i := range versions {
 		vi := &provider.ResourceInfo{
 			// TODO(jfd) we cannot access version content, this will be a problem when trying to fetch version thumbnails
-			//Opaque
+			// Opaque
 			Type: provider.ResourceType_RESOURCE_TYPE_FILE,
 			Id: &provider.ResourceId{
 				StorageId: "versions", // this is a virtual storage
 				OpaqueId:  info.Id.OpaqueId + "@" + versions[i].GetKey(),
 			},
-			//Checksum
-			//Etag: v.ETag,
-			//MimeType
+			// Checksum
+			Etag: versions[i].Etag,
+			// MimeType
 			Mtime: &types.Timestamp{
 				Seconds: versions[i].Mtime,
 				// TODO cs3apis FileVersion should use types.Timestamp instead of uint64
 			},
 			Path: path.Join("v", versions[i].Key),
-			//PermissionSet
+			// PermissionSet
 			Size:  versions[i].Size,
 			Owner: info.Owner,
 		}
@@ -168,7 +163,7 @@ func (h *VersionsHandler) doListVersions(w http.ResponseWriter, r *http.Request,
 
 	propRes, err := s.formatPropfind(ctx, &pf, infos, "")
 	if err != nil {
-		log.Error().Err(err).Msg("error formatting propfind")
+		sublog.Error().Err(err).Msg("error formatting propfind")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -177,7 +172,7 @@ func (h *VersionsHandler) doListVersions(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusMultiStatus)
 	_, err = w.Write([]byte(propRes))
 	if err != nil {
-		log.Error().Err(err).Msg("error writing body")
+		sublog.Error().Err(err).Msg("error writing body")
 		return
 	}
 
@@ -185,11 +180,14 @@ func (h *VersionsHandler) doListVersions(w http.ResponseWriter, r *http.Request,
 
 func (h *VersionsHandler) doRestore(w http.ResponseWriter, r *http.Request, s *svc, rid *provider.ResourceId, key string) {
 	ctx := r.Context()
-	log := appctx.GetLogger(ctx)
+	ctx, span := trace.StartSpan(ctx, "restore")
+	defer span.End()
+
+	sublog := appctx.GetLogger(ctx).With().Interface("resourceid", rid).Str("key", key).Logger()
 
 	client, err := s.getClient()
 	if err != nil {
-		log.Error().Err(err).Msg("error getting grpc client")
+		sublog.Error().Err(err).Msg("error getting grpc client")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -203,16 +201,12 @@ func (h *VersionsHandler) doRestore(w http.ResponseWriter, r *http.Request, s *s
 
 	res, err := client.RestoreFileVersion(ctx, req)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending a grpc restore version request")
+		sublog.Error().Err(err).Msg("error sending a grpc restore version request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	if res.Status.Code != rpc.Code_CODE_OK {
-		if res.Status.Code == rpc.Code_CODE_NOT_FOUND {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
+		HandleErrorStatus(&sublog, w, res.Status)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

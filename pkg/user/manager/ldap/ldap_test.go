@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -63,7 +63,7 @@ func TestUserManager(t *testing.T) {
 		t.Fatalf("expected DisplayName to be: %v, got %v", ldapDefaults.DN, c.Schema.DN)
 	}
 
-	// possitive tests for New
+	// positive tests for New
 	_, err = New(map[string]interface{}{})
 	if err != nil {
 		t.Fatalf(err.Error())

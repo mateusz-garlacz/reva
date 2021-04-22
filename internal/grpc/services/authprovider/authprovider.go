@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 	"github.com/cs3org/reva/pkg/appctx"
 	"github.com/cs3org/reva/pkg/auth"
 	"github.com/cs3org/reva/pkg/auth/manager/registry"
+	"github.com/cs3org/reva/pkg/errtypes"
 	"github.com/cs3org/reva/pkg/rgrpc"
 	"github.com/cs3org/reva/pkg/rgrpc/status"
 	"github.com/mitchellh/mapstructure"
@@ -42,6 +43,12 @@ type config struct {
 	AuthManagers map[string]map[string]interface{} `mapstructure:"auth_managers"`
 }
 
+func (c *config) init() {
+	if c.AuthManager == "" {
+		c.AuthManager = "json"
+	}
+}
+
 type service struct {
 	authmgr auth.Manager
 	conf    *config
@@ -53,6 +60,7 @@ func parseConfig(m map[string]interface{}) (*config, error) {
 		err = errors.Wrap(err, "error decoding conf")
 		return nil, err
 	}
+	c.init()
 	return c, nil
 }
 
@@ -101,18 +109,26 @@ func (s *service) Authenticate(ctx context.Context, req *provider.AuthenticateRe
 	password := req.ClientSecret
 
 	u, err := s.authmgr.Authenticate(ctx, username, password)
-	if err != nil {
+	switch v := err.(type) {
+	case nil:
+		log.Info().Msgf("user %s authenticated", u.String())
+		return &provider.AuthenticateResponse{
+			Status: status.NewOK(ctx),
+			User:   u,
+		}, nil
+	case errtypes.InvalidCredentials:
+		return &provider.AuthenticateResponse{
+			Status: status.NewPermissionDenied(ctx, v, "wrong password"),
+		}, nil
+	case errtypes.NotFound:
+		return &provider.AuthenticateResponse{
+			Status: status.NewNotFound(ctx, "unknown client id"),
+		}, nil
+	default:
 		err = errors.Wrap(err, "authsvc: error in Authenticate")
-		res := &provider.AuthenticateResponse{
+		return &provider.AuthenticateResponse{
 			Status: status.NewUnauthenticated(ctx, err, "error authenticating user"),
-		}
-		return res, nil
+		}, nil
 	}
 
-	log.Info().Msgf("user %s authenticated", u.String())
-	res := &provider.AuthenticateResponse{
-		Status: status.NewOK(ctx),
-		User:   u,
-	}
-	return res, nil
 }

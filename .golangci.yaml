@@ -4,6 +4,14 @@ issues:
       text: "SA1019:"
       linters:
         - staticcheck
+    - path: pkg/utils/utils.go
+      text: "SA1019:"
+      linters:
+        - staticcheck
+    # Exclude scopelint for tests files because of https://github.com/kyoh86/scopelint/issues/4
+    - path: _test\.go
+      linters:
+        - scopelint
 linters:
   enable:
     - bodyclose
@@ -27,4 +35,3 @@ linters:
     - gocritic
     - prealloc
     #- gosec
-

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,7 +22,9 @@ import (
 	"context"
 	"fmt"
 
+	userpb "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
 	collaboration "github.com/cs3org/go-cs3apis/cs3/sharing/collaboration/v1beta1"
+	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
 	"github.com/cs3org/reva/pkg/appctx"
 	"github.com/cs3org/reva/pkg/rgrpc"
 	"github.com/cs3org/reva/pkg/rgrpc/status"
@@ -41,6 +43,12 @@ func init() {
 type config struct {
 	Driver  string                            `mapstructure:"driver"`
 	Drivers map[string]map[string]interface{} `mapstructure:"drivers"`
+}
+
+func (c *config) init() {
+	if c.Driver == "" {
+		c.Driver = "json"
+	}
 }
 
 type service struct {
@@ -85,10 +93,7 @@ func New(m map[string]interface{}, ss *grpc.Server) (rgrpc.Service, error) {
 		return nil, err
 	}
 
-	// if driver is empty we default to json
-	if c.Driver == "" {
-		c.Driver = "json"
-	}
+	c.init()
 
 	sm, err := getShareManager(c)
 	if err != nil {
@@ -105,10 +110,10 @@ func New(m map[string]interface{}, ss *grpc.Server) (rgrpc.Service, error) {
 
 func (s *service) CreateShare(ctx context.Context, req *collaboration.CreateShareRequest) (*collaboration.CreateShareResponse, error) {
 	u := user.ContextMustGetUser(ctx)
-	// TODO(labkode): validate input
-	if req.Grant.Grantee.Id.Idp == "" {
+	if req.Grant.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_USER && req.Grant.Grantee.GetUserId().Idp == "" {
 		// use logged in user Idp as default.
-		req.Grant.Grantee.Id.Idp = u.Id.Idp
+		g := &userpb.UserId{OpaqueId: req.Grant.Grantee.GetUserId().OpaqueId, Idp: u.Id.Idp}
+		req.Grant.Grantee.Id = &provider.Grantee_UserId{UserId: g}
 	}
 	share, err := s.sm.Share(ctx, req.ResourceInfo, req.Grant)
 	if err != nil {

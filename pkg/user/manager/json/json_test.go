@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -39,24 +39,6 @@ func TestUserManager(t *testing.T) {
 	}
 	defer os.RemoveAll(tempdir)
 
-	// parseConfig - negative test
-	input := map[string]interface{}{
-		"users": true,
-	}
-	_, err = New(input)
-	if err == nil {
-		t.Fatalf("no error (but we expected one) while get manager")
-	}
-
-	// read file - negative test
-	input = map[string]interface{}{
-		"thisFailsSoHard": "TestingTesting",
-	}
-	_, err = New(input)
-	if err == nil {
-		t.Fatalf("no error (but we expected one) while get manager")
-	}
-
 	// corrupt json object with user meta data
 	userJSON := `[{`
 
@@ -73,7 +55,7 @@ func TestUserManager(t *testing.T) {
 	}
 
 	// get manager
-	input = map[string]interface{}{
+	input := map[string]interface{}{
 		"users": file.Name(),
 	}
 	_, err = New(input)
@@ -107,12 +89,19 @@ func TestUserManager(t *testing.T) {
 	manager, _ := New(input)
 
 	// setup test data
-	userEinstein := &userpb.UserId{Idp: "localhost", OpaqueId: "einstein"}
+	uidEinstein := &userpb.UserId{Idp: "localhost", OpaqueId: "einstein"}
+	userEinstein := &userpb.User{
+		Id:          uidEinstein,
+		Username:    "einstein",
+		Groups:      []string{"sailing-lovers", "violin-haters", "physics-lovers"},
+		Mail:        "einstein@example.org",
+		DisplayName: "Albert Einstein",
+	}
 	userFake := &userpb.UserId{Idp: "localhost", OpaqueId: "fakeUser"}
 	groupsEinstein := []string{"sailing-lovers", "violin-haters", "physics-lovers"}
 
 	// positive test GetUserGroups
-	resGroups, _ := manager.GetUserGroups(ctx, userEinstein)
+	resGroups, _ := manager.GetUserGroups(ctx, uidEinstein)
 	if !reflect.DeepEqual(resGroups, groupsEinstein) {
 		t.Fatalf("groups differ: expected=%v got=%v", resGroups, groupsEinstein)
 	}
@@ -124,6 +113,19 @@ func TestUserManager(t *testing.T) {
 		t.Fatalf("user not found error differ: expected='%v' got='%v'", expectedErr, err)
 	}
 
+	// positive test GetUserByClaim by mail
+	resUserByEmail, _ := manager.GetUserByClaim(ctx, "mail", "einstein@example.org")
+	if !reflect.DeepEqual(resUserByEmail, userEinstein) {
+		t.Fatalf("user differs: expected=%v got=%v", userEinstein, resUserByEmail)
+	}
+
+	// negative test GetUserByClaim by mail
+	expectedErr = errtypes.NotFound("abc@example.com")
+	_, err = manager.GetUserByClaim(ctx, "mail", "abc@example.com")
+	if !reflect.DeepEqual(err, expectedErr) {
+		t.Fatalf("user not found error differs: expected='%v' got='%v'", expectedErr, err)
+	}
+
 	// test FindUsers
 	resUser, _ := manager.FindUsers(ctx, "stein")
 	if len(resUser) != 1 {
@@ -131,27 +133,5 @@ func TestUserManager(t *testing.T) {
 	}
 	if !reflect.DeepEqual(resUser[0].Username, "einstein") {
 		t.Fatalf("user differ: expected=%v got=%v", "einstein", resUser[0].Username)
-	}
-
-	// positive test IsInGroup
-	resInGroup, _ := manager.IsInGroup(ctx, userEinstein, "physics-lovers")
-	if !resInGroup {
-		t.Fatalf("user not in group: expected=%v got=%v", true, false)
-	}
-
-	// negative test IsInGroup with wrong group
-	resInGroup, _ = manager.IsInGroup(ctx, userEinstein, "notARealGroup")
-	if resInGroup {
-		t.Fatalf("user not in group: expected=%v got=%v", true, false)
-	}
-
-	// negative test IsInGroup with wrong user
-	expectedErr = errtypes.NotFound(userFake.OpaqueId)
-	resInGroup, err = manager.IsInGroup(ctx, userFake, "physics-lovers")
-	if !reflect.DeepEqual(err, expectedErr) {
-		t.Fatalf("user not in group error differ: expected='%v' got='%v'", expectedErr, err)
-	}
-	if resInGroup {
-		t.Fatalf("user not in group bool differ: expected='%v' got='%v'", false, resInGroup)
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,7 +31,9 @@ import (
 	"github.com/cs3org/reva/cmd/revad/internal/config"
 	"github.com/cs3org/reva/cmd/revad/internal/grace"
 	"github.com/cs3org/reva/cmd/revad/runtime"
-	"github.com/gofrs/uuid"
+	"github.com/cs3org/reva/pkg/sysinfo"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -40,6 +42,7 @@ var (
 	signalFlag  = flag.String("s", "", "send signal to a master process: stop, quit, reload")
 	configFlag  = flag.String("c", "/etc/revad/revad.toml", "set configuration file")
 	pidFlag     = flag.String("p", "", "pid file. If empty defaults to a random file in the OS temporary directory")
+	logFlag     = flag.String("log", "", "log messages with the given severity or above. One of: [trace, debug, info, warn, error, fatal, panic]")
 	dirFlag     = flag.String("dev-dir", "", "runs any toml file in the specified directory. Intended for development use only")
 
 	// Compile time variables initialized with gcc flags.
@@ -48,6 +51,12 @@ var (
 
 func main() {
 	flag.Parse()
+
+	// initialize the global system information
+	if err := sysinfo.InitSystemInfo(&sysinfo.RevaVersion{Version: version, BuildDate: buildDate, GitCommit: gitCommit, GoVersion: goVersion}); err != nil {
+		fmt.Fprintf(os.Stderr, "error initializing system info: %s\n", err.Error())
+		// This is not really a fatal error, so don't panic
+	}
 
 	handleVersionFlag()
 	handleSignalFlag()
@@ -77,7 +86,7 @@ func main() {
 func handleVersionFlag() {
 	if *versionFlag {
 		fmt.Fprintf(os.Stderr, "%s\n", getVersionString())
-		os.Exit(1)
+		os.Exit(0)
 	}
 }
 
@@ -202,11 +211,11 @@ func runSingle(conf map[string]interface{}) {
 		*pidFlag = getPidfile()
 	}
 
-	runtime.Run(conf, *pidFlag)
+	runtime.Run(conf, *pidFlag, *logFlag)
 }
 
 func getPidfile() string {
-	uuid := uuid.Must(uuid.NewV4())
+	uuid := uuid.New().String()
 	name := fmt.Sprintf("revad-%s.pid", uuid)
 
 	return path.Join(os.TempDir(), name)
@@ -218,8 +227,8 @@ func runMultiple(confs []map[string]interface{}) {
 		wg.Add(1)
 		pidfile := getPidfile()
 		go func(wg *sync.WaitGroup, conf map[string]interface{}) {
-			runtime.Run(conf, pidfile)
-			wg.Done()
+			defer wg.Done()
+			runtime.Run(conf, pidfile, *logFlag)
 		}(&wg, conf)
 	}
 	wg.Wait()

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,26 +21,30 @@ package ocs
 import (
 	"net/http"
 
+	"github.com/cs3org/reva/internal/http/services/owncloud/ocs/config"
+	"github.com/cs3org/reva/internal/http/services/owncloud/ocs/handlers/apps"
+	"github.com/cs3org/reva/internal/http/services/owncloud/ocs/handlers/cloud"
+	configHandler "github.com/cs3org/reva/internal/http/services/owncloud/ocs/handlers/config"
+	"github.com/cs3org/reva/internal/http/services/owncloud/ocs/response"
 	"github.com/cs3org/reva/pkg/rhttp/router"
 )
 
 // V1Handler routes to the different sub handlers
 type V1Handler struct {
-	AppsHandler   *AppsHandler
-	CloudHandler  *CloudHandler
-	ConfigHandler *ConfigHandler
+	AppsHandler   *apps.Handler
+	CloudHandler  *cloud.Handler
+	ConfigHandler *configHandler.Handler
 }
 
-func (h *V1Handler) init(c *Config) error {
-	h.AppsHandler = new(AppsHandler)
-	if err := h.AppsHandler.init(c); err != nil {
+func (h *V1Handler) init(c *config.Config) error {
+	h.ConfigHandler = new(configHandler.Handler)
+	h.ConfigHandler.Init(c)
+	h.AppsHandler = new(apps.Handler)
+	if err := h.AppsHandler.Init(c); err != nil {
 		return err
 	}
-	h.CloudHandler = new(CloudHandler)
-	h.CloudHandler.init(c)
-	h.ConfigHandler = new(ConfigHandler)
-	h.ConfigHandler.init(c)
-	return nil
+	h.CloudHandler = new(cloud.Handler)
+	return h.CloudHandler.Init(c)
 }
 
 // Handler handles requests
@@ -56,7 +60,7 @@ func (h *V1Handler) Handler() http.Handler {
 		case "config":
 			h.ConfigHandler.Handler().ServeHTTP(w, r)
 		default:
-			WriteOCSError(w, r, MetaNotFound.StatusCode, "Not found", nil)
+			response.WriteOCSError(w, r, response.MetaNotFound.StatusCode, "Not found", nil)
 		}
 	})
 }

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -97,10 +97,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error creating tmp directory to store changelog: %s", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(tmp)
 
 	if err := os.MkdirAll(path.Join(tmp, "changelog"), 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "error creating changelog in temporary directory: %s", tmp)
+		os.RemoveAll(tmp)
 		os.Exit(1)
 	}
 
@@ -113,10 +113,12 @@ func main() {
 	run(cmd)
 
 	// Generate changelog also in the documentation
-	if err := os.MkdirAll(fmt.Sprintf("docs/content/en/docs/Changelog/%s", *version), 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "error creating docs/content/en/docs/Changelog/%s: %s", *version, err)
+	if err := os.MkdirAll(fmt.Sprintf("docs/content/en/docs/changelog/%s", *version), 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "error creating docs/content/en/docs/changelog/%s: %s", *version, err)
+		os.RemoveAll(tmp)
 		os.Exit(1)
 	}
+	os.RemoveAll(tmp)
 
 	data, err := ioutil.ReadFile("changelog/NOTE.md")
 	if err != nil {
@@ -136,7 +138,7 @@ description: >
 `, *version, *version, *version, date)
 
 	releaseDocs += string(data)
-	if err := ioutil.WriteFile(fmt.Sprintf("docs/content/en/docs/Changelog/%s/_index.md", *version), []byte(releaseDocs), 0644); err != nil {
+	if err := ioutil.WriteFile(fmt.Sprintf("docs/content/en/docs/changelog/%s/_index.md", *version), []byte(releaseDocs), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing docs release file _index.md: %s", err)
 		os.Exit(1)
 	}
@@ -146,7 +148,7 @@ description: >
 		"CHANGELOG.md",
 		"VERSION",
 		"RELEASE_DATE",
-		"docs/content/en/docs/Changelog",
+		"docs/content/en/docs/changelog",
 	)
 
 	if *commit {
@@ -182,7 +184,7 @@ func isRepoDirty() bool {
 
 func add(msg string, files ...string) {
 	for _, f := range files {
-		cmd := exec.Command("git", "add", f)
+		cmd := exec.Command("git", "add", "--all", f)
 		cmd.Dir = "."
 		run(cmd)
 	}

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,6 +28,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cs3org/reva/pkg/registry/memory"
+
+	"github.com/cs3org/reva/pkg/utils"
+
 	"contrib.go.opencensus.io/exporter/jaeger"
 	"github.com/cs3org/reva/cmd/revad/internal/grace"
 	"github.com/cs3org/reva/pkg/logger"
@@ -44,12 +48,34 @@ import (
 )
 
 // Run runs a reva server with the given config file and pid file.
-func Run(mainConf map[string]interface{}, pidFile string) {
+func Run(mainConf map[string]interface{}, pidFile, logLevel string) {
+	logConf := parseLogConfOrDie(mainConf["log"], logLevel)
+	logger := initLogger(logConf)
+	RunWithOptions(mainConf, pidFile, WithLogger(logger))
+}
+
+// RunWithOptions runs a reva server with the given config file, pid file and options.
+func RunWithOptions(mainConf map[string]interface{}, pidFile string, opts ...Option) {
+	options := newOptions(opts...)
 	parseSharedConfOrDie(mainConf["shared"])
 	coreConf := parseCoreConfOrDie(mainConf["core"])
-	logConf := parseLogConfOrDie(mainConf["log"])
 
-	run(mainConf, coreConf, logConf, pidFile)
+	// TODO: one can pass the options from the config file to registry.New() and initialize a registry based upon config files.
+	if options.Registry != nil {
+		utils.GlobalRegistry = options.Registry
+	} else if _, ok := mainConf["registry"]; ok {
+		for _, services := range mainConf["registry"].(map[string]interface{}) {
+			for sName, nodes := range services.(map[string]interface{}) {
+				for _, instance := range nodes.([]interface{}) {
+					if err := utils.GlobalRegistry.Add(memory.NewService(sName, instance.(map[string]interface{})["nodes"].([]interface{}))); err != nil {
+						panic(err)
+					}
+				}
+			}
+		}
+	}
+
+	run(mainConf, coreConf, options.Logger, pidFile)
 }
 
 type coreConf struct {
@@ -60,12 +86,11 @@ type coreConf struct {
 	TracingServiceName string `mapstructure:"tracing_service_name"`
 }
 
-func run(mainConf map[string]interface{}, coreConf *coreConf, logConf *logConf, filename string) {
-	logger := initLogger(logConf)
-
+func run(mainConf map[string]interface{}, coreConf *coreConf, logger *zerolog.Logger, filename string) {
 	host, _ := os.Hostname()
 	logger.Info().Msgf("host info: %s", host)
 
+	// initRegistry()
 	initTracing(coreConf, logger)
 	initCPUCount(coreConf, logger)
 
@@ -139,7 +164,7 @@ func initCPUCount(conf *coreConf, log *zerolog.Logger) {
 		log.Error().Err(err).Msg("error adjusting number of cpus")
 		os.Exit(1)
 	}
-	//log.Info().Msgf("%s", getVersionString())
+	// log.Info().Msgf("%s", getVersionString())
 	log.Info().Msgf("running on %d cpus", ncpus)
 }
 
@@ -258,14 +283,6 @@ func setupOpenCensus(conf *coreConf) error {
 		return nil
 	}
 
-	if conf.TracingEndpoint == "" {
-		conf.TracingEndpoint = "localhost:6831"
-	}
-
-	if conf.TracingCollector == "" {
-		conf.TracingCollector = "http://localhost:14268/api/traces"
-	}
-
 	if conf.TracingServiceName == "" {
 		conf.TracingServiceName = "revad"
 	}
@@ -342,7 +359,7 @@ func parseSharedConfOrDie(v interface{}) {
 	}
 }
 
-func parseLogConfOrDie(v interface{}) *logConf {
+func parseLogConfOrDie(v interface{}, logLevel string) *logConf {
 	c := &logConf{}
 	if err := mapstructure.Decode(v, c); err != nil {
 		fmt.Fprintf(os.Stderr, "error decoding log config: %s\n", err.Error())
@@ -352,6 +369,11 @@ func parseLogConfOrDie(v interface{}) *logConf {
 	// if mode is not set, we use console mode, easier for devs
 	if c.Mode == "" {
 		c.Mode = "console"
+	}
+
+	// Give priority to the log level passed through the command line.
+	if logLevel != "" {
+		c.Level = logLevel
 	}
 
 	return c

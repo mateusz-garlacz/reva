@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,10 +23,16 @@ import (
 	_ "github.com/cs3org/reva/internal/http/services/datagateway"
 	_ "github.com/cs3org/reva/internal/http/services/dataprovider"
 	_ "github.com/cs3org/reva/internal/http/services/helloworld"
+	_ "github.com/cs3org/reva/internal/http/services/mentix"
+	_ "github.com/cs3org/reva/internal/http/services/meshdirectory"
+	_ "github.com/cs3org/reva/internal/http/services/metrics"
+	_ "github.com/cs3org/reva/internal/http/services/ocmd"
 	_ "github.com/cs3org/reva/internal/http/services/oidcprovider"
 	_ "github.com/cs3org/reva/internal/http/services/owncloud/ocdav"
 	_ "github.com/cs3org/reva/internal/http/services/owncloud/ocs"
 	_ "github.com/cs3org/reva/internal/http/services/prometheus"
+	_ "github.com/cs3org/reva/internal/http/services/siteacc"
+	_ "github.com/cs3org/reva/internal/http/services/sysinfo"
 	_ "github.com/cs3org/reva/internal/http/services/wellknown"
 	// Add your own service here
 )

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,10 +24,17 @@ import (
 	_ "github.com/cs3org/reva/internal/grpc/services/appregistry"
 	_ "github.com/cs3org/reva/internal/grpc/services/authprovider"
 	_ "github.com/cs3org/reva/internal/grpc/services/authregistry"
+	_ "github.com/cs3org/reva/internal/grpc/services/datatx"
 	_ "github.com/cs3org/reva/internal/grpc/services/gateway"
+	_ "github.com/cs3org/reva/internal/grpc/services/groupprovider"
 	_ "github.com/cs3org/reva/internal/grpc/services/helloworld"
+	_ "github.com/cs3org/reva/internal/grpc/services/ocmcore"
+	_ "github.com/cs3org/reva/internal/grpc/services/ocminvitemanager"
+	_ "github.com/cs3org/reva/internal/grpc/services/ocmproviderauthorizer"
+	_ "github.com/cs3org/reva/internal/grpc/services/ocmshareprovider"
 	_ "github.com/cs3org/reva/internal/grpc/services/preferences"
 	_ "github.com/cs3org/reva/internal/grpc/services/publicshareprovider"
+	_ "github.com/cs3org/reva/internal/grpc/services/publicstorageprovider"
 	_ "github.com/cs3org/reva/internal/grpc/services/storageprovider"
 	_ "github.com/cs3org/reva/internal/grpc/services/storageregistry"
 	_ "github.com/cs3org/reva/internal/grpc/services/userprovider"

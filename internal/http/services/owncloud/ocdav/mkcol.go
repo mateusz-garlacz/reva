@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,24 +26,29 @@ import (
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
 	"github.com/cs3org/reva/pkg/appctx"
+	"go.opencensus.io/trace"
 )
 
-func (s *svc) doMkcol(w http.ResponseWriter, r *http.Request, ns string) {
+func (s *svc) handleMkcol(w http.ResponseWriter, r *http.Request, ns string) {
 	ctx := r.Context()
-	log := appctx.GetLogger(ctx)
+	ctx, span := trace.StartSpan(ctx, "mkcol")
+	defer span.End()
+
 	fn := path.Join(ns, r.URL.Path)
+
+	sublog := appctx.GetLogger(ctx).With().Str("path", fn).Logger()
 
 	buf := make([]byte, 1)
 	_, err := r.Body.Read(buf)
 	if err != io.EOF {
-		log.Error().Err(err).Msg("error reading request body")
+		sublog.Error().Err(err).Msg("error reading request body")
 		w.WriteHeader(http.StatusUnsupportedMediaType)
 		return
 	}
 
 	client, err := s.getClient()
 	if err != nil {
-		log.Error().Err(err).Msg("error getting grpc client")
+		sublog.Error().Err(err).Msg("error getting grpc client")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -55,34 +60,34 @@ func (s *svc) doMkcol(w http.ResponseWriter, r *http.Request, ns string) {
 	statReq := &provider.StatRequest{Ref: ref}
 	statRes, err := client.Stat(ctx, statReq)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending a grpc stat request")
+		sublog.Error().Err(err).Msg("error sending a grpc stat request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	if statRes.Status.Code == rpc.Code_CODE_OK {
-		log.Warn().Msg("resource already exists")
-		w.WriteHeader(http.StatusMethodNotAllowed) // 405 if it already exists
+	if statRes.Status.Code != rpc.Code_CODE_NOT_FOUND {
+		if statRes.Status.Code == rpc.Code_CODE_OK {
+			w.WriteHeader(http.StatusMethodNotAllowed) // 405 if it already exists
+		} else {
+			HandleErrorStatus(&sublog, w, statRes.Status)
+		}
 		return
 	}
 
 	req := &provider.CreateContainerRequest{Ref: ref}
 	res, err := client.CreateContainer(ctx, req)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending create container grpc request")
+		sublog.Error().Err(err).Msg("error sending create container grpc request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-
-	if res.Status.Code == rpc.Code_CODE_NOT_FOUND {
+	switch res.Status.Code {
+	case rpc.Code_CODE_OK:
+		w.WriteHeader(http.StatusCreated)
+	case rpc.Code_CODE_NOT_FOUND:
+		sublog.Debug().Str("path", fn).Interface("status", statRes.Status).Msg("conflict")
 		w.WriteHeader(http.StatusConflict)
-		return
+	default:
+		HandleErrorStatus(&sublog, w, res.Status)
 	}
-
-	if res.Status.Code != rpc.Code_CODE_OK {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusCreated)
 }

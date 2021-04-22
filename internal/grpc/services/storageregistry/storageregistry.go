@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 
 	registrypb "github.com/cs3org/go-cs3apis/cs3/storage/registry/v1beta1"
 	"github.com/cs3org/reva/pkg/appctx"
+	"github.com/cs3org/reva/pkg/errtypes"
 	"github.com/cs3org/reva/pkg/rgrpc"
 	"github.com/cs3org/reva/pkg/rgrpc/status"
 	"github.com/cs3org/reva/pkg/storage"
@@ -57,12 +58,20 @@ type config struct {
 	Drivers map[string]map[string]interface{} `mapstructure:"drivers"`
 }
 
+func (c *config) init() {
+	if c.Driver == "" {
+		c.Driver = "static"
+	}
+}
+
 // New creates a new StorageBrokerService
 func New(m map[string]interface{}, ss *grpc.Server) (rgrpc.Service, error) {
 	c, err := parseConfig(m)
 	if err != nil {
 		return nil, err
 	}
+
+	c.init()
 
 	reg, err := getRegistry(c)
 	if err != nil {
@@ -99,31 +108,31 @@ func (s *service) ListStorageProviders(ctx context.Context, req *registrypb.List
 		}, nil
 	}
 
-	providers := make([]*registrypb.ProviderInfo, 0, len(pinfos))
-	for _, info := range pinfos {
-		fill(info)
-		providers = append(providers, info)
-	}
-
 	res := &registrypb.ListStorageProvidersResponse{
 		Status:    status.NewOK(ctx),
-		Providers: providers,
+		Providers: pinfos,
 	}
 	return res, nil
 }
 
-func (s *service) GetStorageProvider(ctx context.Context, req *registrypb.GetStorageProviderRequest) (*registrypb.GetStorageProviderResponse, error) {
-	p, err := s.reg.FindProvider(ctx, req.Ref)
+func (s *service) GetStorageProviders(ctx context.Context, req *registrypb.GetStorageProvidersRequest) (*registrypb.GetStorageProvidersResponse, error) {
+	p, err := s.reg.FindProviders(ctx, req.Ref)
 	if err != nil {
-		return &registrypb.GetStorageProviderResponse{
-			Status: status.NewInternal(ctx, err, "error finding storage provider"),
-		}, nil
+		switch err.(type) {
+		case errtypes.IsNotFound:
+			return &registrypb.GetStorageProvidersResponse{
+				Status: status.NewNotFound(ctx, err.Error()),
+			}, nil
+		default:
+			return &registrypb.GetStorageProvidersResponse{
+				Status: status.NewInternal(ctx, err, "error finding storage provider"),
+			}, nil
+		}
 	}
 
-	fill(p)
-	res := &registrypb.GetStorageProviderResponse{
-		Status:   status.NewOK(ctx),
-		Provider: p,
+	res := &registrypb.GetStorageProvidersResponse{
+		Status:    status.NewOK(ctx),
+		Providers: p,
 	}
 	return res, nil
 }
@@ -145,6 +154,3 @@ func (s *service) GetHome(ctx context.Context, req *registrypb.GetHomeRequest) (
 	}
 	return res, nil
 }
-
-// TODO(labkode): fix
-func fill(p *registrypb.ProviderInfo) {}

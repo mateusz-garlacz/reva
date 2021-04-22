@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,7 +20,9 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -29,6 +31,8 @@ import (
 	link "github.com/cs3org/go-cs3apis/cs3/sharing/link/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
 	typespb "github.com/cs3org/go-cs3apis/cs3/types/v1beta1"
+	"github.com/cs3org/reva/pkg/appctx"
+	"github.com/cs3org/reva/pkg/errtypes"
 	"github.com/cs3org/reva/pkg/publicshare"
 	"github.com/cs3org/reva/pkg/publicshare/manager/registry"
 )
@@ -48,51 +52,88 @@ type manager struct {
 	shares sync.Map
 }
 
-// CreatePublicShare safely adds a new entry to manager.shares
+var (
+	passwordProtected bool
+)
+
+// CreatePublicShare adds a new entry to manager.shares
 func (m *manager) CreatePublicShare(ctx context.Context, u *user.User, rInfo *provider.ResourceInfo, g *link.Grant) (*link.PublicShare, error) {
-	// where could this initialization go wrong and early return?
 	id := &link.PublicShareId{
-		OpaqueId: randString(12),
+		OpaqueId: randString(15),
 	}
-	tkn := randString(12)
+
+	tkn := randString(15)
 	now := uint64(time.Now().Unix())
 
-	newShare := link.PublicShare{
-		Id:          id,
-		Owner:       rInfo.GetOwner(),
-		Creator:     u.Id,
-		ResourceId:  rInfo.Id,
-		Token:       tkn,
-		Permissions: g.Permissions,
-		Ctime: &typespb.Timestamp{
-			Seconds: now,
-			Nanos:   uint32(now % 1000000000),
-		},
-		Mtime: &typespb.Timestamp{
-			Seconds: now,
-			Nanos:   uint32(now % 1000000000),
-		},
-		PasswordProtected: false,
-		Expiration:        g.Expiration,
-		DisplayName:       tkn,
+	displayName, ok := rInfo.ArbitraryMetadata.Metadata["name"]
+	if !ok {
+		displayName = tkn
 	}
 
-	m.shares.Store(newShare.Token, &newShare)
-	return &newShare, nil
+	if g.Password != "" {
+		passwordProtected = true
+	}
+
+	createdAt := &typespb.Timestamp{
+		Seconds: now,
+		Nanos:   uint32(now % 1000000000),
+	}
+
+	modifiedAt := &typespb.Timestamp{
+		Seconds: now,
+		Nanos:   uint32(now % 1000000000),
+	}
+
+	s := link.PublicShare{
+		Id:                id,
+		Owner:             rInfo.GetOwner(),
+		Creator:           u.Id,
+		ResourceId:        rInfo.Id,
+		Token:             tkn,
+		Permissions:       g.Permissions,
+		Ctime:             createdAt,
+		Mtime:             modifiedAt,
+		PasswordProtected: passwordProtected,
+		Expiration:        g.Expiration,
+		DisplayName:       displayName,
+	}
+
+	m.shares.Store(s.Token, &s)
+	return &s, nil
 }
 
 // UpdatePublicShare updates the expiration date, permissions and Mtime
-func (m *manager) UpdatePublicShare(ctx context.Context, u *user.User, ref *link.PublicShareReference, g *link.Grant) (*link.PublicShare, error) {
-	share, err := m.GetPublicShare(ctx, u, ref)
+func (m *manager) UpdatePublicShare(ctx context.Context, u *user.User, req *link.UpdatePublicShareRequest, g *link.Grant) (*link.PublicShare, error) {
+	log := appctx.GetLogger(ctx)
+	share, err := m.GetPublicShare(ctx, u, req.Ref, false)
 	if err != nil {
 		return nil, errors.New("ref does not exist")
 	}
 
 	token := share.GetToken()
 
-	// thread unsafe. 2 goroutines can access to the same resource?
-	share.Permissions = g.Permissions
-	share.Expiration = g.Expiration
+	switch req.GetUpdate().GetType() {
+	case link.UpdatePublicShareRequest_Update_TYPE_DISPLAYNAME:
+		log.Debug().Str("memory", "update display name").Msgf("from: `%v` to `%v`", share.DisplayName, req.Update.GetDisplayName())
+		share.DisplayName = req.Update.GetDisplayName()
+	case link.UpdatePublicShareRequest_Update_TYPE_PERMISSIONS:
+		old, _ := json.Marshal(share.Permissions)
+		new, _ := json.Marshal(req.Update.GetGrant().Permissions)
+		log.Debug().Str("memory", "update grants").Msgf("from: `%v`\nto\n`%v`", old, new)
+		share.Permissions = req.Update.GetGrant().GetPermissions()
+	case link.UpdatePublicShareRequest_Update_TYPE_EXPIRATION:
+		old, _ := json.Marshal(share.Expiration)
+		new, _ := json.Marshal(req.Update.GetGrant().Expiration)
+		log.Debug().Str("memory", "update expiration").Msgf("from: `%v`\nto\n`%v`", old, new)
+		share.Expiration = req.Update.GetGrant().Expiration
+	case link.UpdatePublicShareRequest_Update_TYPE_PASSWORD:
+		// TODO(refs) Do public shares need Grants? Struct is defined, just not used. Fill this once it's done.
+		fallthrough
+	default:
+		return nil, fmt.Errorf("invalid update type: %v", req.GetUpdate().GetType())
+	}
+
+	// share.Expiration = g.Expiration
 	share.Mtime = &typespb.Timestamp{
 		Seconds: uint64(time.Now().Unix()),
 		Nanos:   uint32(time.Now().Unix() % 1000000000),
@@ -100,15 +141,17 @@ func (m *manager) UpdatePublicShare(ctx context.Context, u *user.User, ref *link
 
 	m.shares.Store(token, share)
 
-	return &link.PublicShare{}, nil
+	return share, nil
 }
 
-func (m *manager) GetPublicShare(ctx context.Context, u *user.User, ref *link.PublicShareReference) (share *link.PublicShare, err error) {
+func (m *manager) GetPublicShare(ctx context.Context, u *user.User, ref *link.PublicShareReference, sign bool) (share *link.PublicShare, err error) {
+	// TODO(refs) return an error if the share is expired.
+
 	// Attempt to fetch public share by token
 	if ref.GetToken() != "" {
-		share, err = m.GetPublicShareByToken(ctx, ref.GetToken())
+		share, err = m.GetPublicShareByToken(ctx, ref.GetToken(), &link.PublicShareAuthentication{}, sign)
 		if err != nil {
-			return nil, errors.New("there are no shares for the given reference")
+			return nil, errors.New("no shares found by token")
 		}
 	}
 
@@ -116,40 +159,66 @@ func (m *manager) GetPublicShare(ctx context.Context, u *user.User, ref *link.Pu
 	if ref.GetId() != nil {
 		share, err = m.getPublicShareByTokenID(ctx, *ref.GetId())
 		if err != nil {
-			return nil, errors.New("there are no shares for the given reference")
+			return nil, errors.New("no shares found by id")
 		}
 	}
 
-	return share, nil
+	return
 }
 
-func (m *manager) ListPublicShares(ctx context.Context, u *user.User, md *provider.ResourceInfo) ([]*link.PublicShare, error) {
+func (m *manager) ListPublicShares(ctx context.Context, u *user.User, filters []*link.ListPublicSharesRequest_Filter, md *provider.ResourceInfo, sign bool) ([]*link.PublicShare, error) {
+	// TODO(refs) filter out expired shares
 	shares := []*link.PublicShare{}
 	m.shares.Range(func(k, v interface{}) bool {
-		shares = append(shares, v.(*link.PublicShare))
+		s := v.(*link.PublicShare)
+
+		// Skip if the share isn't created by the current user
+		if s.Creator.GetOpaqueId() == u.Id.OpaqueId && (s.Creator.GetIdp() == "" || u.Id.Idp == s.Creator.GetIdp()) {
+			if len(filters) == 0 {
+				shares = append(shares, s)
+			} else {
+				for _, f := range filters {
+					if f.Type == link.ListPublicSharesRequest_Filter_TYPE_RESOURCE_ID {
+						if s.ResourceId.StorageId == f.GetResourceId().StorageId && s.ResourceId.OpaqueId == f.GetResourceId().OpaqueId {
+							shares = append(shares, s)
+						}
+					}
+				}
+			}
+		}
 		return true
 	})
 
 	return shares, nil
 }
 
-func (m *manager) RevokePublicShare(ctx context.Context, u *user.User, id string) (err error) {
-	// check whether the referente exists
-	if _, err := m.GetPublicShareByToken(ctx, id); err != nil {
+func (m *manager) RevokePublicShare(ctx context.Context, u *user.User, ref *link.PublicShareReference) error {
+	// check whether the reference exists
+	switch {
+	case ref.GetId() != nil && ref.GetId().OpaqueId != "":
+		s, err := m.getPublicShareByTokenID(ctx, *ref.GetId())
+		if err != nil {
+			return errors.New("reference does not exist")
+		}
+		m.shares.Delete(s.Token)
+	case ref.GetToken() != "":
+		if _, err := m.GetPublicShareByToken(ctx, ref.GetToken(), &link.PublicShareAuthentication{}, false); err != nil {
+			return errors.New("reference does not exist")
+		}
+		m.shares.Delete(ref.GetToken())
+	default:
 		return errors.New("reference does not exist")
 	}
-	m.shares.Delete(id)
-	return
+	return nil
 }
 
-func (m *manager) GetPublicShareByToken(ctx context.Context, token string) (*link.PublicShare, error) {
+func (m *manager) GetPublicShareByToken(ctx context.Context, token string, auth *link.PublicShareAuthentication, sign bool) (*link.PublicShare, error) {
 	if ps, ok := m.shares.Load(token); ok {
 		return ps.(*link.PublicShare), nil
 	}
-	return nil, errors.New("invalid token")
+	return nil, errtypes.NotFound("invalid token")
 }
 
-// Helpers
 func randString(n int) string {
 	var l = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 	b := make([]rune, n)
@@ -160,19 +229,17 @@ func randString(n int) string {
 }
 
 func (m *manager) getPublicShareByTokenID(ctx context.Context, targetID link.PublicShareId) (*link.PublicShare, error) {
-	// iterate over existing shares and return the first one matching the id
 	var found *link.PublicShare
 	m.shares.Range(func(k, v interface{}) bool {
 		id := v.(*link.PublicShare).GetId()
 		if targetID.String() == id.String() {
 			found = v.(*link.PublicShare)
-			return true
 		}
-		return false
+		return true
 	})
 
 	if found != nil {
 		return found, nil
 	}
-	return nil, errors.New("invalid token")
+	return nil, errors.New("resource not found")
 }

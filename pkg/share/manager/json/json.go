@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,8 +23,6 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"os"
-	"path"
-	"reflect"
 	"sync"
 	"time"
 
@@ -39,6 +37,7 @@ import (
 
 	"github.com/cs3org/reva/pkg/share/manager/registry"
 	"github.com/cs3org/reva/pkg/user"
+	"github.com/cs3org/reva/pkg/utils"
 )
 
 func init() {
@@ -53,15 +52,7 @@ func New(m map[string]interface{}) (share.Manager, error) {
 		return nil, err
 	}
 
-	// if file is not set we use temporary file
-	if c.File == "" {
-		dir, err := ioutil.TempDir("", "")
-		if err != nil {
-			err = errors.Wrap(err, "error creating temporary directory for storing shares")
-			return nil, err
-		}
-		c.File = path.Join(dir, "shares.json")
-	}
+	c.init()
 
 	// load or create file
 	model, err := loadOrCreate(c.File)
@@ -70,17 +61,15 @@ func New(m map[string]interface{}) (share.Manager, error) {
 		return nil, err
 	}
 
-	mgr := &mgr{
+	return &mgr{
 		c:     c,
 		model: model,
-	}
-
-	return mgr, nil
+	}, nil
 }
 
 func loadOrCreate(file string) (*shareModel, error) {
-	_, err := os.Stat(file)
-	if os.IsNotExist(err) {
+	info, err := os.Stat(file)
+	if os.IsNotExist(err) || info.Size() == 0 {
 		if err := ioutil.WriteFile(file, []byte("{}"), 0700); err != nil {
 			err = errors.Wrap(err, "error opening/creating the file: "+file)
 			return nil, err
@@ -100,10 +89,19 @@ func loadOrCreate(file string) (*shareModel, error) {
 		return nil, err
 	}
 
-	m := &shareModel{}
-	if err := json.Unmarshal(data, m); err != nil {
-		err = errors.Wrap(err, "error decoding data to json")
+	j := &jsonEncoding{}
+	if err := json.Unmarshal(data, j); err != nil {
+		err = errors.Wrap(err, "error decoding data from json")
 		return nil, err
+	}
+
+	m := &shareModel{State: j.State}
+	for _, s := range j.Shares {
+		var decShare collaboration.Share
+		if err = utils.UnmarshalJSONToProtoV1([]byte(s), &decShare); err != nil {
+			return nil, errors.Wrap(err, "error decoding share from json")
+		}
+		m.Shares = append(m.Shares, &decShare)
 	}
 
 	if m.State == nil {
@@ -116,12 +114,26 @@ func loadOrCreate(file string) (*shareModel, error) {
 
 type shareModel struct {
 	file   string
-	State  map[string]map[string]collaboration.ShareState `json:"state"` // map[username]map[share_id]boolean
+	State  map[string]map[string]collaboration.ShareState `json:"state"` // map[username]map[share_id]ShareState
 	Shares []*collaboration.Share                         `json:"shares"`
 }
 
+type jsonEncoding struct {
+	State  map[string]map[string]collaboration.ShareState `json:"state"` // map[username]map[share_id]ShareState
+	Shares []string                                       `json:"shares"`
+}
+
 func (m *shareModel) Save() error {
-	data, err := json.Marshal(m)
+	j := &jsonEncoding{State: m.State}
+	for _, s := range m.Shares {
+		encShare, err := utils.MarshalProtoV1ToJSON(s)
+		if err != nil {
+			return errors.Wrap(err, "error encoding to json")
+		}
+		j.Shares = append(j.Shares, string(encShare))
+	}
+
+	data, err := json.Marshal(j)
 	if err != nil {
 		err = errors.Wrap(err, "error encoding to json")
 		return err
@@ -137,12 +149,18 @@ func (m *shareModel) Save() error {
 
 type mgr struct {
 	c          *config
-	sync.Mutex // concurrent access to the file and loaded
+	sync.Mutex // concurrent access to the file
 	model      *shareModel
 }
 
 type config struct {
 	File string `mapstructure:"file"`
+}
+
+func (c *config) init() {
+	if c.File == "" {
+		c.File = "/var/tmp/reva/shares.json"
+	}
 }
 
 func parseConfig(m map[string]interface{}) (*config, error) {
@@ -166,16 +184,16 @@ func (m *mgr) Share(ctx context.Context, md *provider.ResourceInfo, g *collabora
 		Nanos:   uint32(now % 1000000000),
 	}
 
-	// do not allow share to myself if share is for a user
-	// TODO(labkode): should not this be catched already at the gw level?
+	// do not allow share to myself or the owner if share is for a user
+	// TODO(labkode): should not this be caught already at the gw level?
 	if g.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_USER &&
-		g.Grantee.Id.Idp == user.Id.Idp && g.Grantee.Id.OpaqueId == user.Id.OpaqueId {
-		return nil, errors.New("json: user and grantee are the same")
+		(utils.UserEqual(g.Grantee.GetUserId(), user.Id) || utils.UserEqual(g.Grantee.GetUserId(), md.Owner)) {
+		return nil, errors.New("json: owner/creator and grantee are the same")
 	}
 
 	// check if share already exists.
 	key := &collaboration.ShareKey{
-		Owner:      user.Id,
+		Owner:      md.Owner,
 		ResourceId: md.Id,
 		Grantee:    g.Grantee,
 	}
@@ -193,7 +211,7 @@ func (m *mgr) Share(ctx context.Context, md *provider.ResourceInfo, g *collabora
 		ResourceId:  md.Id,
 		Permissions: g.Permissions,
 		Grantee:     g.Grantee,
-		Owner:       user.Id,
+		Owner:       md.Owner,
 		Creator:     user.Id,
 		Ctime:       ts,
 		Mtime:       ts,
@@ -226,9 +244,8 @@ func (m *mgr) getByKey(ctx context.Context, key *collaboration.ShareKey) (*colla
 	m.Lock()
 	defer m.Unlock()
 	for _, s := range m.model.Shares {
-		if key.Owner.Idp == s.Owner.Idp && key.Owner.OpaqueId == s.Owner.OpaqueId &&
-			key.ResourceId.StorageId == s.ResourceId.StorageId && key.ResourceId.OpaqueId == s.ResourceId.OpaqueId &&
-			key.Grantee.Type == s.Grantee.Type && key.Grantee.Id.Idp == s.Grantee.Id.Idp && key.Grantee.Id.OpaqueId == s.Grantee.Id.OpaqueId {
+		if (utils.UserEqual(key.Owner, s.Owner) || utils.UserEqual(key.Owner, s.Creator)) &&
+			utils.ResourceEqual(key.ResourceId, s.ResourceId) && utils.GranteeEqual(key.Grantee, s.Grantee) {
 			return s, nil
 		}
 	}
@@ -250,12 +267,22 @@ func (m *mgr) get(ctx context.Context, ref *collaboration.ShareReference) (s *co
 	}
 
 	// check if we are the owner
-	// TODO(labkode): check for creator also.
 	user := user.ContextMustGetUser(ctx)
-	if user.Id.Idp == s.Owner.Idp && user.Id.OpaqueId == s.Owner.OpaqueId {
+	if utils.UserEqual(user.Id, s.Owner) || utils.UserEqual(user.Id, s.Creator) {
 		return s, nil
 	}
 
+	// or the grantee
+	if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_USER && utils.UserEqual(user.Id, s.Grantee.GetUserId()) {
+		return s, nil
+	} else if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_GROUP {
+		// check if all user groups match this share; TODO(labkode): filter shares created by us.
+		for _, g := range user.Groups {
+			if g == s.Grantee.GetGroupId().OpaqueId {
+				return s, nil
+			}
+		}
+	}
 	// we return not found to not disclose information
 	return nil, errtypes.NotFound(ref.String())
 }
@@ -274,8 +301,8 @@ func (m *mgr) Unshare(ctx context.Context, ref *collaboration.ShareReference) er
 	defer m.Unlock()
 	user := user.ContextMustGetUser(ctx)
 	for i, s := range m.model.Shares {
-		if equal(ref, s) {
-			if user.Id.Idp == s.Owner.Idp && user.Id.OpaqueId == s.Owner.OpaqueId {
+		if sharesEqual(ref, s) {
+			if utils.UserEqual(user.Id, s.Owner) || utils.UserEqual(user.Id, s.Creator) {
 				m.model.Shares[len(m.model.Shares)-1], m.model.Shares[i] = m.model.Shares[i], m.model.Shares[len(m.model.Shares)-1]
 				m.model.Shares = m.model.Shares[:len(m.model.Shares)-1]
 				if err := m.model.Save(); err != nil {
@@ -289,14 +316,14 @@ func (m *mgr) Unshare(ctx context.Context, ref *collaboration.ShareReference) er
 	return errtypes.NotFound(ref.String())
 }
 
-// TODO(labkode): this is fragile, the check should be done on primitve types.
-func equal(ref *collaboration.ShareReference, s *collaboration.Share) bool {
+func sharesEqual(ref *collaboration.ShareReference, s *collaboration.Share) bool {
 	if ref.GetId() != nil && s.Id != nil {
 		if ref.GetId().OpaqueId == s.Id.OpaqueId {
 			return true
 		}
 	} else if ref.GetKey() != nil {
-		if reflect.DeepEqual(*ref.GetKey().Owner, *s.Owner) && reflect.DeepEqual(*ref.GetKey().ResourceId, *s.ResourceId) && reflect.DeepEqual(*ref.GetKey().Grantee, *s.Grantee) {
+		if (utils.UserEqual(ref.GetKey().Owner, s.Owner) || utils.UserEqual(ref.GetKey().Owner, s.Creator)) &&
+			utils.ResourceEqual(ref.GetKey().ResourceId, s.ResourceId) && utils.GranteeEqual(ref.GetKey().Grantee, s.Grantee) {
 			return true
 		}
 	}
@@ -308,8 +335,8 @@ func (m *mgr) UpdateShare(ctx context.Context, ref *collaboration.ShareReference
 	defer m.Unlock()
 	user := user.ContextMustGetUser(ctx)
 	for i, s := range m.model.Shares {
-		if equal(ref, s) {
-			if user.Id.Idp == s.Owner.Idp && user.Id.OpaqueId == s.Owner.OpaqueId {
+		if sharesEqual(ref, s) {
+			if utils.UserEqual(user.Id, s.Owner) || utils.UserEqual(user.Id, s.Creator) {
 				now := time.Now().UnixNano()
 				m.model.Shares[i].Permissions = p
 				m.model.Shares[i].Mtime = &typespb.Timestamp{
@@ -333,8 +360,7 @@ func (m *mgr) ListShares(ctx context.Context, filters []*collaboration.ListShare
 	defer m.Unlock()
 	user := user.ContextMustGetUser(ctx)
 	for _, s := range m.model.Shares {
-		// TODO(labkode): add check for creator.
-		if user.Id.Idp == s.Owner.Idp && user.Id.OpaqueId == s.Owner.OpaqueId {
+		if utils.UserEqual(user.Id, s.Owner) || utils.UserEqual(user.Id, s.Creator) {
 			// no filter we return earlier
 			if len(filters) == 0 {
 				ss = append(ss, s)
@@ -343,7 +369,7 @@ func (m *mgr) ListShares(ctx context.Context, filters []*collaboration.ListShare
 				// TODO(labkode): add the rest of filters.
 				for _, f := range filters {
 					if f.Type == collaboration.ListSharesRequest_Filter_TYPE_RESOURCE_ID {
-						if s.ResourceId.StorageId == f.GetResourceId().StorageId && s.ResourceId.OpaqueId == f.GetResourceId().OpaqueId {
+						if utils.ResourceEqual(s.ResourceId, f.GetResourceId()) {
 							ss = append(ss, s)
 						}
 					}
@@ -361,20 +387,17 @@ func (m *mgr) ListReceivedShares(ctx context.Context) ([]*collaboration.Received
 	defer m.Unlock()
 	user := user.ContextMustGetUser(ctx)
 	for _, s := range m.model.Shares {
-		if user.Id.Idp == s.Owner.Idp && user.Id.OpaqueId == s.Owner.OpaqueId {
+		if utils.UserEqual(user.Id, s.Owner) || utils.UserEqual(user.Id, s.Creator) {
 			// omit shares created by me
-			// TODO(labkode): apply check for s.Creator also.
 			continue
 		}
-		if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_USER {
-			if user.Id.Idp == s.Grantee.Id.Idp && user.Id.OpaqueId == s.Grantee.Id.OpaqueId {
-				rs := m.convert(ctx, s)
-				rss = append(rss, rs)
-			}
+		if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_USER && utils.UserEqual(user.Id, s.Grantee.GetUserId()) {
+			rs := m.convert(ctx, s)
+			rss = append(rss, rs)
 		} else if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_GROUP {
 			// check if all user groups match this share; TODO(labkode): filter shares created by us.
 			for _, g := range user.Groups {
-				if g == s.Grantee.Id.OpaqueId {
+				if g == s.Grantee.GetGroupId().OpaqueId {
 					rs := m.convert(ctx, s)
 					rss = append(rss, rs)
 				}
@@ -388,6 +411,7 @@ func (m *mgr) ListReceivedShares(ctx context.Context) ([]*collaboration.Received
 func (m *mgr) convert(ctx context.Context, s *collaboration.Share) *collaboration.ReceivedShare {
 	rs := &collaboration.ReceivedShare{
 		Share: s,
+		State: collaboration.ShareState_SHARE_STATE_PENDING,
 	}
 	user := user.ContextMustGetUser(ctx)
 	if v, ok := m.model.State[user.Id.String()]; ok {
@@ -407,14 +431,13 @@ func (m *mgr) getReceived(ctx context.Context, ref *collaboration.ShareReference
 	defer m.Unlock()
 	user := user.ContextMustGetUser(ctx)
 	for _, s := range m.model.Shares {
-		if equal(ref, s) {
-			if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_USER &&
-				s.Grantee.Id.Idp == user.Id.Idp && s.Grantee.Id.OpaqueId == user.Id.OpaqueId {
+		if sharesEqual(ref, s) {
+			if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_USER && utils.UserEqual(user.Id, s.Grantee.GetUserId()) {
 				rs := m.convert(ctx, s)
 				return rs, nil
 			} else if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_GROUP {
 				for _, g := range user.Groups {
-					if s.Grantee.Id.OpaqueId == g {
+					if s.Grantee.GetGroupId().OpaqueId == g {
 						rs := m.convert(ctx, s)
 						return rs, nil
 					}
@@ -450,5 +473,6 @@ func (m *mgr) UpdateReceivedShare(ctx context.Context, ref *collaboration.ShareR
 		return nil, err
 	}
 
+	rs.State = f.GetState()
 	return rs, nil
 }

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,26 +19,37 @@
 package ocdav
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"path"
+	"strconv"
+	"strings"
 	"time"
+
+	"github.com/cs3org/reva/internal/grpc/services/storageprovider"
+	"github.com/cs3org/reva/internal/http/services/datagateway"
+	"go.opencensus.io/trace"
 
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
-	"github.com/cs3org/reva/internal/http/utils"
 	"github.com/cs3org/reva/pkg/appctx"
 	"github.com/cs3org/reva/pkg/rhttp"
+	"github.com/cs3org/reva/pkg/utils"
 )
 
-func (s *svc) doGet(w http.ResponseWriter, r *http.Request, ns string) {
+func (s *svc) handleGet(w http.ResponseWriter, r *http.Request, ns string) {
 	ctx := r.Context()
-	log := appctx.GetLogger(ctx)
+	ctx, span := trace.StartSpan(ctx, "get")
+	defer span.End()
+
 	fn := path.Join(ns, r.URL.Path)
+
+	sublog := appctx.GetLogger(ctx).With().Str("path", fn).Str("svc", "ocdav").Str("handler", "get").Logger()
 
 	client, err := s.getClient()
 	if err != nil {
-		log.Error().Err(err).Msg("error getting grpc client")
+		sublog.Error().Err(err).Msg("error getting grpc client")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -50,24 +61,19 @@ func (s *svc) doGet(w http.ResponseWriter, r *http.Request, ns string) {
 	}
 	sRes, err := client.Stat(ctx, sReq)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending grpc stat request")
+		sublog.Error().Err(err).Msg("error sending grpc stat request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	if sRes.Status.Code != rpc.Code_CODE_OK {
-		log.Warn().Str("code", string(sRes.Status.Code)).Msg("grpc request failed")
-		statusCode := http.StatusInternalServerError
-		if sRes.Status.Code == rpc.Code_CODE_NOT_FOUND {
-			statusCode = http.StatusNotFound
-		}
-		w.WriteHeader(statusCode)
+		HandleErrorStatus(&sublog, w, sRes.Status)
 		return
 	}
 
 	info := sRes.Info
 	if info.Type == provider.ResourceType_RESOURCE_TYPE_CONTAINER {
-		log.Warn().Msg("resource is a folder and cannot be downloaded")
+		sublog.Warn().Msg("resource is a folder and cannot be downloaded")
 		w.WriteHeader(http.StatusNotImplemented)
 		return
 	}
@@ -80,54 +86,82 @@ func (s *svc) doGet(w http.ResponseWriter, r *http.Request, ns string) {
 
 	dRes, err := client.InitiateFileDownload(ctx, dReq)
 	if err != nil {
-		log.Error().Err(err).Msg("error initiating file download")
+		sublog.Error().Err(err).Msg("error initiating file download")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	if dRes.Status.Code != rpc.Code_CODE_OK {
-		w.WriteHeader(http.StatusInternalServerError)
+		HandleErrorStatus(&sublog, w, dRes.Status)
 		return
 	}
 
-	dataServerURL := dRes.DownloadEndpoint
+	var ep, token string
+	for _, p := range dRes.Protocols {
+		if p.Protocol == "simple" {
+			ep, token = p.DownloadEndpoint, p.Token
+		}
+	}
 
-	// TODO(labkode): perfrom protocol switch
-	httpReq, err := rhttp.NewRequest(ctx, "GET", dataServerURL, nil)
+	httpReq, err := rhttp.NewRequest(ctx, "GET", ep, nil)
 	if err != nil {
-		log.Error().Err(err).Msg("error creating http request")
+		sublog.Error().Err(err).Msg("error creating http request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	httpReq.Header.Set("X-Reva-Transfer", dRes.Token)
-	httpClient := rhttp.GetHTTPClient(ctx)
+	httpReq.Header.Set(datagateway.TokenTransportHeader, token)
+
+	if r.Header.Get("Range") != "" {
+		httpReq.Header.Set("Range", r.Header.Get("Range"))
+	}
+
+	httpClient := s.client
 
 	httpRes, err := httpClient.Do(httpReq)
 	if err != nil {
-		log.Error().Err(err).Msg("error performing http request")
+		sublog.Error().Err(err).Msg("error performing http request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	defer httpRes.Body.Close()
 
-	if httpRes.StatusCode != http.StatusOK {
-		w.WriteHeader(http.StatusInternalServerError)
+	if httpRes.StatusCode != http.StatusOK && httpRes.StatusCode != http.StatusPartialContent {
+		w.WriteHeader(httpRes.StatusCode)
 		return
 	}
 
 	w.Header().Set("Content-Type", info.MimeType)
+	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+
+		path.Base(info.Path)+"; filename=\""+path.Base(info.Path)+"\"")
 	w.Header().Set("ETag", info.Etag)
 	w.Header().Set("OC-FileId", wrapResourceID(info.Id))
 	w.Header().Set("OC-ETag", info.Etag)
-	t := utils.TSToTime(info.Mtime)
-	lastModifiedString := t.Format(time.RFC1123)
+	t := utils.TSToTime(info.Mtime).UTC()
+	lastModifiedString := t.Format(time.RFC1123Z)
 	w.Header().Set("Last-Modified", lastModifiedString)
-	/*
-		if md.Checksum != "" {
-			w.Header().Set("OC-Checksum", md.Checksum)
-		}
-	*/
-	if _, err := io.Copy(w, httpRes.Body); err != nil {
-		log.Error().Err(err).Msg("error finishing copying data to response")
+
+	if httpRes.StatusCode == http.StatusPartialContent {
+		w.Header().Set("Content-Range", httpRes.Header.Get("Content-Range"))
+		w.Header().Set("Content-Length", httpRes.Header.Get("Content-Length"))
+		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		w.Header().Set("Content-Length", strconv.FormatUint(info.Size, 10))
 	}
+	if info.Checksum != nil {
+		w.Header().Set("OC-Checksum", fmt.Sprintf("%s:%s", strings.ToUpper(string(storageprovider.GRPC2PKGXS(info.Checksum.Type))), info.Checksum.Sum))
+	}
+	var c int64
+	if c, err = io.Copy(w, httpRes.Body); err != nil {
+		sublog.Error().Err(err).Msg("error finishing copying data to response")
+	}
+	if httpRes.Header.Get("Content-Length") != "" {
+		i, err := strconv.ParseInt(httpRes.Header.Get("Content-Length"), 10, 64)
+		if err != nil {
+			sublog.Error().Err(err).Str("content-length", httpRes.Header.Get("Content-Length")).Msg("invalid content length in datagateway response")
+		}
+		if i != c {
+			sublog.Error().Int64("content-length", i).Int64("transferred-bytes", c).Msg("content length vs transferred bytes mismatch")
+		}
+	}
+	// TODO we need to send the If-Match etag in the GET to the datagateway to prevent race conditions between stating and reading the file
 }

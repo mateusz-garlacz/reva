@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,20 +19,30 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
+	"time"
+
+	"github.com/c-bata/go-prompt"
+	"github.com/cs3org/reva/pkg/rhttp"
 )
 
 var (
-	conf *config
+	conf                                   *config
+	host                                   string
+	insecure, skipverify, disableargprompt bool
+	timeout                                int
+
+	helpCommandOutput string
 
 	gitCommit, buildDate, version, goVersion string
-)
 
-func main() {
+	client *http.Client
 
-	cmds := []*command{
+	commands = []*command{
 		versionCommand(),
 		configureCommand(),
 		loginCommand(),
@@ -45,8 +55,21 @@ func main() {
 		rmCommand(),
 		moveCommand(),
 		mkdirCommand(),
+		ocmFindAcceptedUsersCommand(),
+		ocmInviteGenerateCommand(),
+		ocmInviteForwardCommand(),
+		ocmShareCreateCommand(),
+		ocmShareListCommand(),
+		ocmShareRemoveCommand(),
+		ocmShareUpdateCommand(),
+		ocmShareListReceivedCommand(),
+		ocmShareUpdateReceivedCommand(),
 		preferencesCommand(),
 		genCommand(),
+		publicShareCreateCommand(),
+		publicShareListCommand(),
+		publicShareRemoveCommand(),
+		publicShareUpdateCommand(),
 		recycleListCommand(),
 		recycleRestoreCommand(),
 		recyclePurgeCommand(),
@@ -56,62 +79,73 @@ func main() {
 		shareUpdateCommand(),
 		shareListReceivedCommand(),
 		shareUpdateReceivedCommand(),
+		openFileInAppProviderCommand(),
+		transferCreateCommand(),
+		transferGetStatusCommand(),
+		transferCancelCommand(),
+		helpCommand(),
 	}
+)
 
-	mainUsage := createMainUsage(cmds)
+func init() {
+	flag.StringVar(&host, "host", "", "address of the GRPC gateway host")
+	flag.BoolVar(&insecure, "insecure", false, "disables grpc transport security")
+	flag.BoolVar(&skipverify, "skip-verify", false, "whether to skip verifying the server's certificate chain and host name")
+	flag.BoolVar(&disableargprompt, "disable-arg-prompt", false, "whether to disable prompts for command arguments")
+	flag.IntVar(&timeout, "timout", -1, "the timeout in seconds for executing the commands, -1 means no timeout")
+	flag.Parse()
+}
 
-	// Verify that a subcommand has been provided
-	// os.Arg[0] is the main command
-	// os.Arg[1] will be the subcommand
-	if len(os.Args) < 2 {
-		fmt.Println(mainUsage)
-		os.Exit(1)
-	}
+func main() {
 
-	// Verify a configuration file exists.
-	// If if does not, create one
-	c, err := readConfig()
-	if err != nil && os.Args[1] != "configure" {
-		fmt.Println("reva is not initialized, run \"reva configure\"")
-		os.Exit(1)
-	} else if os.Args[1] != "configure" {
-		conf = c
-	}
-
-	// Run command
-	action := os.Args[1]
-	for _, v := range cmds {
-		if v.Name == action {
-			if err := v.Parse(os.Args[2:]); err != nil {
-				fmt.Println(err)
-				os.Exit(1)
-			}
-			err := v.Action()
-			if err != nil {
-				fmt.Println(err)
-				os.Exit(1)
-			}
-			os.Exit(0)
+	if host != "" {
+		conf = &config{host}
+		if err := writeConfig(conf); err != nil {
+			fmt.Println("error writing to config file")
+			os.Exit(1)
 		}
 	}
 
-	fmt.Println(mainUsage)
-	os.Exit(1)
+	client = rhttp.GetHTTPClient(
+		// TODO make insecure configurable
+		rhttp.Insecure(true),
+		// TODO make timeout configurable
+		rhttp.Timeout(time.Duration(24*int64(time.Hour))),
+	)
+
+	generateMainUsage()
+	executor := Executor{Timeout: timeout}
+	completer := Completer{DisableArgPrompt: disableargprompt}
+	completer.init()
+
+	if len(flag.Args()) > 0 {
+		executor.Execute(strings.Join(flag.Args(), " "))
+		return
+	}
+
+	fmt.Printf("reva-cli %s (rev-%s)\n", version, gitCommit)
+	fmt.Println("Please use `exit` or `Ctrl-D` to exit this program.")
+
+	p := prompt.New(
+		executor.Execute,
+		completer.Complete,
+		prompt.OptionTitle("reva-cli"),
+		prompt.OptionPrefix(">> "),
+	)
+	p.Run()
 }
 
-func createMainUsage(cmds []*command) string {
+func generateMainUsage() {
 	n := 0
-	for _, cmd := range cmds {
+	for _, cmd := range commands {
 		l := len(cmd.Name)
 		if l > n {
 			n = l
 		}
 	}
 
-	usage := "Command line interface to REVA\n\n"
-	for _, cmd := range cmds {
-		usage += fmt.Sprintf("%s%s%s\n", cmd.Name, strings.Repeat(" ", 4+(n-len(cmd.Name))), cmd.Description())
+	helpCommandOutput = "Command line interface to REVA:\n"
+	for _, cmd := range commands {
+		helpCommandOutput += fmt.Sprintf("%s%s%s\n", cmd.Name, strings.Repeat(" ", 4+(n-len(cmd.Name))), cmd.Description())
 	}
-	usage += "\nThe REVA authors"
-	return usage
 }

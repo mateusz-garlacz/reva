@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ import (
 )
 
 var (
-	dev       = flag.Bool("dev", false, "if devs is set to true creates dev builds with commit and build date")
+	dev       = flag.Bool("dev", false, "if dev is set to true creates dev builds with commit and build date")
 	commit    = flag.String("commit", "", "sets git commit")
 	version   = flag.String("version", "", "sets git version")
 	goVersion = flag.String("goversion", "", "sets go version")
@@ -80,6 +80,9 @@ func main() {
 	for _, bin := range binaries {
 		for _, o := range oses {
 			for _, arch := range archs {
+				if o == "darwin" && arch == "386" { // https://golang.org/doc/go1.14#darwin
+					continue
+				}
 				out := fmt.Sprintf("./dist/%s_%s_%s_%s", bin, *version, o, arch)
 				args := []string{"build", "-o", out, "-ldflags", ldFlags, "./cmd/" + bin}
 				cmd := exec.Command("go", args...)
@@ -113,10 +116,11 @@ func hashFile(file string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer f.Close()
 	if _, err := io.Copy(hasher, f); err != nil {
+		f.Close()
 		log.Fatal(err)
 	}
+	f.Close()
 	val := hex.EncodeToString(hasher.Sum(nil))
 	if err := ioutil.WriteFile(file+".sha256", []byte(val), 0644); err != nil {
 		log.Fatal(err)

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,28 +20,33 @@ package ocdav
 
 import (
 	"net/http"
-	"net/url"
 	"path"
 	"strings"
 
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
 	"github.com/cs3org/reva/pkg/appctx"
+	"go.opencensus.io/trace"
 )
 
-func (s *svc) doMove(w http.ResponseWriter, r *http.Request, ns string) {
+func (s *svc) handleMove(w http.ResponseWriter, r *http.Request, ns string) {
 	ctx := r.Context()
-	log := appctx.GetLogger(ctx)
+	ctx, span := trace.StartSpan(ctx, "move")
+	defer span.End()
+
 	src := path.Join(ns, r.URL.Path)
 	dstHeader := r.Header.Get("Destination")
 	overwrite := r.Header.Get("Overwrite")
 
-	log.Info().Str("src", src).Str("dst", dstHeader).Str("overwrite", overwrite).Msg("move")
-
-	if dstHeader == "" {
+	dst, err := extractDestination(dstHeader, r.Context().Value(ctxKeyBaseURI).(string))
+	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	dst = path.Join(ns, dst)
+
+	sublog := appctx.GetLogger(ctx).With().Str("src", src).Str("dst", dst).Logger()
+	sublog.Debug().Str("overwrite", overwrite).Msg("move")
 
 	overwrite = strings.ToUpper(overwrite)
 	if overwrite == "" {
@@ -55,25 +60,8 @@ func (s *svc) doMove(w http.ResponseWriter, r *http.Request, ns string) {
 
 	client, err := s.getClient()
 	if err != nil {
-		log.Error().Err(err).Msg("error getting grpc client")
+		sublog.Error().Err(err).Msg("error getting grpc client")
 		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	// strip baseURL from destination
-	dstURL, err := url.ParseRequestURI(dstHeader)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	urlPath := dstURL.Path
-	baseURI := r.Context().Value(ctxKeyBaseURI).(string)
-	log.Info().Str("url_path", urlPath).Str("base_uri", baseURI).Msg("move urls")
-	// TODO replace with HasPrefix:
-	i := strings.Index(urlPath, baseURI)
-	if i == -1 {
-		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
@@ -85,23 +73,14 @@ func (s *svc) doMove(w http.ResponseWriter, r *http.Request, ns string) {
 	}
 	srcStatRes, err := client.Stat(ctx, srcStatReq)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending grpc stat request")
+		sublog.Error().Err(err).Msg("error sending grpc stat request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-
 	if srcStatRes.Status.Code != rpc.Code_CODE_OK {
-		if srcStatRes.Status.Code == rpc.Code_CODE_NOT_FOUND {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
+		HandleErrorStatus(&sublog, w, srcStatRes.Status)
 		return
 	}
-
-	// TODO check if path is on same storage, return 502 on problems, see https://tools.ietf.org/html/rfc4918#section-9.9.4
-	// prefix to namespace
-	dst := path.Join(ns, urlPath[len(baseURI):])
 
 	// check dst exists
 	dstStatRef := &provider.Reference{
@@ -110,17 +89,21 @@ func (s *svc) doMove(w http.ResponseWriter, r *http.Request, ns string) {
 	dstStatReq := &provider.StatRequest{Ref: dstStatRef}
 	dstStatRes, err := client.Stat(ctx, dstStatReq)
 	if err != nil {
-		log.Error().Err(err).Msg("error getting grpc client")
+		sublog.Error().Err(err).Msg("error getting grpc client")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	if dstStatRes.Status.Code != rpc.Code_CODE_OK && dstStatRes.Status.Code != rpc.Code_CODE_NOT_FOUND {
+		HandleErrorStatus(&sublog, w, srcStatRes.Status)
+		return
+	}
 
-	var successCode int
+	successCode := http.StatusCreated // 201 if new resource was created, see https://tools.ietf.org/html/rfc4918#section-9.9.4
 	if dstStatRes.Status.Code == rpc.Code_CODE_OK {
 		successCode = http.StatusNoContent // 204 if target already existed, see https://tools.ietf.org/html/rfc4918#section-9.9.4
 
 		if overwrite == "F" {
-			log.Warn().Str("dst", dst).Msg("dst already exists")
+			sublog.Warn().Str("overwrite", overwrite).Msg("dst already exists")
 			w.WriteHeader(http.StatusPreconditionFailed) // 412, see https://tools.ietf.org/html/rfc4918#section-9.9.4
 			return
 		}
@@ -129,19 +112,16 @@ func (s *svc) doMove(w http.ResponseWriter, r *http.Request, ns string) {
 		delReq := &provider.DeleteRequest{Ref: dstStatRef}
 		delRes, err := client.Delete(ctx, delReq)
 		if err != nil {
-			log.Error().Err(err).Msg("error sending grpc delete request")
+			sublog.Error().Err(err).Msg("error sending grpc delete request")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
-		// TODO return a forbidden status if read only?
-		if delRes.Status.Code != rpc.Code_CODE_OK {
-			w.WriteHeader(http.StatusInternalServerError)
+		if delRes.Status.Code != rpc.Code_CODE_OK && delRes.Status.Code != rpc.Code_CODE_NOT_FOUND {
+			HandleErrorStatus(&sublog, w, delRes.Status)
 			return
 		}
 	} else {
-		successCode = http.StatusCreated // 201 if new resource was created, see https://tools.ietf.org/html/rfc4918#section-9.9.4
-
 		// check if an intermediate path / the parent exists
 		intermediateDir := path.Dir(dst)
 		ref2 := &provider.Reference{
@@ -150,12 +130,18 @@ func (s *svc) doMove(w http.ResponseWriter, r *http.Request, ns string) {
 		intStatReq := &provider.StatRequest{Ref: ref2}
 		intStatRes, err := client.Stat(ctx, intStatReq)
 		if err != nil {
-			log.Error().Err(err).Msg("error sending grpc stat request")
+			sublog.Error().Err(err).Msg("error sending grpc stat request")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		if intStatRes.Status.Code == rpc.Code_CODE_NOT_FOUND {
-			w.WriteHeader(http.StatusConflict) // 409 if intermediate dir is missing, see https://tools.ietf.org/html/rfc4918#section-9.9.4
+		if intStatRes.Status.Code != rpc.Code_CODE_OK {
+			if intStatRes.Status.Code == rpc.Code_CODE_NOT_FOUND {
+				// 409 if intermediate dir is missing, see https://tools.ietf.org/html/rfc4918#section-9.8.5
+				sublog.Debug().Str("parent", intermediateDir).Interface("status", intStatRes.Status).Msg("conflict")
+				w.WriteHeader(http.StatusConflict)
+			} else {
+				HandleErrorStatus(&sublog, w, intStatRes.Status)
+			}
 			return
 		}
 		// TODO what if intermediate is a file?
@@ -170,25 +156,25 @@ func (s *svc) doMove(w http.ResponseWriter, r *http.Request, ns string) {
 	mReq := &provider.MoveRequest{Source: sourceRef, Destination: dstRef}
 	mRes, err := client.Move(ctx, mReq)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending move grpc request")
+		sublog.Error().Err(err).Msg("error sending move grpc request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	if mRes.Status.Code != rpc.Code_CODE_OK {
-		w.WriteHeader(http.StatusInternalServerError)
+		HandleErrorStatus(&sublog, w, mRes.Status)
 		return
 	}
 
 	dstStatRes, err = client.Stat(ctx, dstStatReq)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending grpc stat request")
+		sublog.Error().Err(err).Msg("error sending grpc stat request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	if dstStatRes.Status.Code != rpc.Code_CODE_OK {
-		w.WriteHeader(http.StatusInternalServerError)
+		HandleErrorStatus(&sublog, w, dstStatRes.Status)
 		return
 	}
 

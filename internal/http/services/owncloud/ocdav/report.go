@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,10 +26,10 @@ import (
 	"github.com/cs3org/reva/pkg/appctx"
 )
 
-func (s *svc) doReport(w http.ResponseWriter, r *http.Request, ns string) {
+func (s *svc) handleReport(w http.ResponseWriter, r *http.Request, ns string) {
 	ctx := r.Context()
 	log := appctx.GetLogger(ctx)
-	//fn := path.Join(ns, r.URL.Path)
+	// fn := path.Join(ns, r.URL.Path)
 
 	rep, status, err := readReport(r.Body)
 	if err != nil {

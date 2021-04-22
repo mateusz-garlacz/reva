@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -42,8 +42,14 @@ type manager struct {
 }
 
 type config struct {
-	// Users holds a path to a file containing json conforming the Users struct
+	// Users holds a path to a file containing json conforming to the Users struct
 	Users string `mapstructure:"users"`
+}
+
+func (c *config) init() {
+	if c.Users == "" {
+		c.Users = "/etc/revad/users.json"
+	}
 }
 
 func parseConfig(m map[string]interface{}) (*config, error) {
@@ -52,6 +58,7 @@ func parseConfig(m map[string]interface{}) (*config, error) {
 		err = errors.Wrap(err, "error decoding conf")
 		return nil, err
 	}
+	c.init()
 	return c, nil
 }
 
@@ -81,17 +88,45 @@ func New(m map[string]interface{}) (user.Manager, error) {
 
 func (m *manager) GetUser(ctx context.Context, uid *userpb.UserId) (*userpb.User, error) {
 	for _, u := range m.users {
-		// TODO(jfd) we should also compare idp / iss? labkode: yes we should
-		if u.Id.GetOpaqueId() == uid.OpaqueId || u.Username == uid.OpaqueId {
+		if (u.Id.GetOpaqueId() == uid.OpaqueId || u.Username == uid.OpaqueId) && (uid.Idp == "" || uid.Idp == u.Id.GetIdp()) {
 			return u, nil
 		}
 	}
 	return nil, errtypes.NotFound(uid.OpaqueId)
 }
 
+func (m *manager) GetUserByClaim(ctx context.Context, claim, value string) (*userpb.User, error) {
+	for _, u := range m.users {
+		if userClaim, err := extractClaim(u, claim); err == nil && value == userClaim {
+			return u, nil
+		}
+	}
+	return nil, errtypes.NotFound(value)
+}
+
+func extractClaim(u *userpb.User, claim string) (string, error) {
+	switch claim {
+	case "mail":
+		return u.Mail, nil
+	case "username":
+		return u.Username, nil
+	case "uid":
+		if u.Opaque != nil && u.Opaque.Map != nil {
+			if uidObj, ok := u.Opaque.Map["uid"]; ok {
+				if uidObj.Decoder == "plain" {
+					return string(uidObj.Value), nil
+				}
+			}
+		}
+	}
+	return "", errors.New("json: invalid field")
+}
+
 // TODO(jfd) search Opaque? compare sub?
 func userContains(u *userpb.User, query string) bool {
-	return strings.Contains(u.Username, query) || strings.Contains(u.DisplayName, query) || strings.Contains(u.Mail, query) || strings.Contains(u.Id.OpaqueId, query)
+	query = strings.ToLower(query)
+	return strings.Contains(strings.ToLower(u.Username), query) || strings.Contains(strings.ToLower(u.DisplayName), query) ||
+		strings.Contains(strings.ToLower(u.Mail), query) || strings.Contains(strings.ToLower(u.Id.OpaqueId), query)
 }
 
 func (m *manager) FindUsers(ctx context.Context, query string) ([]*userpb.User, error) {
@@ -110,18 +145,4 @@ func (m *manager) GetUserGroups(ctx context.Context, uid *userpb.UserId) ([]stri
 		return nil, err
 	}
 	return user.Groups, nil
-}
-
-func (m *manager) IsInGroup(ctx context.Context, uid *userpb.UserId, group string) (bool, error) {
-	user, err := m.GetUser(ctx, uid)
-	if err != nil {
-		return false, err
-	}
-
-	for _, g := range user.Groups {
-		if group == g {
-			return true, nil
-		}
-	}
-	return false, nil
 }

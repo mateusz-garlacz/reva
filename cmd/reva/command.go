@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,15 +21,17 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 )
 
-// command is the representation to create commands
+// Command is the representation to create commands
 type command struct {
 	*flag.FlagSet
 	Name        string
-	Action      func() error
+	Action      func(w ...io.Writer) error
 	Usage       func() string
 	Description func() string
+	ResetFlags  func()
 }
 
 // newCommand creates a new command
@@ -40,14 +42,15 @@ func newCommand(name string) *command {
 		Usage: func() string {
 			return fmt.Sprintf("Usage: %s", name)
 		},
-		Action: func() error {
+		Action: func(w ...io.Writer) error {
 			fmt.Println("Hello REVA")
 			return nil
 		},
 		Description: func() string {
 			return "TODO description"
 		},
-		FlagSet: fs,
+		FlagSet:    fs,
+		ResetFlags: func() {},
 	}
 	return cmd
 }

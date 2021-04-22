@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -65,7 +65,7 @@ func ContextSetUserID(ctx context.Context, id *userpb.UserId) context.Context {
 // Manager is the interface to implement to manipulate users.
 type Manager interface {
 	GetUser(ctx context.Context, uid *userpb.UserId) (*userpb.User, error)
+	GetUserByClaim(ctx context.Context, claim, value string) (*userpb.User, error)
 	GetUserGroups(ctx context.Context, uid *userpb.UserId) ([]string, error)
-	IsInGroup(ctx context.Context, uid *userpb.UserId, group string) (bool, error)
 	FindUsers(ctx context.Context, query string) ([]*userpb.User, error)
 }

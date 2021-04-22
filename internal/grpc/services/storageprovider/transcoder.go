@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,9 +30,9 @@ func (x XS) String() string { return string(x) }
 const (
 	// XSInvalid means the checksum type is invalid.
 	XSInvalid XS = "invalid"
-	//XSUnset means the checksum is optional.
+	// XSUnset means the checksum is optional.
 	XSUnset = "unset"
-	// XSAdler32 means the checkum is adler32
+	// XSAdler32 means the checksum is adler32
 	XSAdler32 = "adler32"
 	// XSMD5 means the checksum is md5
 	XSMD5 = "md5"

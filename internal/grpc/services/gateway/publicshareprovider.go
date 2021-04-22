@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,12 +24,15 @@ import (
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	link "github.com/cs3org/go-cs3apis/cs3/sharing/link/v1beta1"
 	"github.com/cs3org/reva/pkg/appctx"
-	"github.com/cs3org/reva/pkg/rgrpc/status"
 	"github.com/cs3org/reva/pkg/rgrpc/todo/pool"
 	"github.com/pkg/errors"
 )
 
 func (s *svc) CreatePublicShare(ctx context.Context, req *link.CreatePublicShareRequest) (*link.CreatePublicShareResponse, error) {
+	if s.isSharedFolder(ctx, req.ResourceInfo.GetPath()) {
+		return nil, errors.New("gateway: can't create a public share of the share folder itself")
+	}
+
 	log := appctx.GetLogger(ctx)
 	log.Info().Msg("create public share")
 
@@ -43,7 +46,6 @@ func (s *svc) CreatePublicShare(ctx context.Context, req *link.CreatePublicShare
 		return nil, err
 	}
 
-	// TODO(refs) commit to storage if configured
 	return res, nil
 }
 
@@ -51,28 +53,49 @@ func (s *svc) RemovePublicShare(ctx context.Context, req *link.RemovePublicShare
 	log := appctx.GetLogger(ctx)
 	log.Info().Msg("remove public share")
 
-	return &link.RemovePublicShareResponse{
-		Status: status.NewOK(ctx),
-	}, nil
+	driver, err := pool.GetPublicShareProviderClient(s.c.PublicShareProviderEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	res, err := driver.RemovePublicShare(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 func (s *svc) GetPublicShareByToken(ctx context.Context, req *link.GetPublicShareByTokenRequest) (*link.GetPublicShareByTokenResponse, error) {
 	log := appctx.GetLogger(ctx)
-	log.Info().Msg("remove public share")
+	log.Info().Msg("get public share by token")
 
-	return &link.GetPublicShareByTokenResponse{
-		Status: status.NewOK(ctx),
-	}, nil
+	driver, err := pool.GetPublicShareProviderClient(s.c.PublicShareProviderEndpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := driver.GetPublicShareByToken(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
 }
 
 func (s *svc) GetPublicShare(ctx context.Context, req *link.GetPublicShareRequest) (*link.GetPublicShareResponse, error) {
 	log := appctx.GetLogger(ctx)
 	log.Info().Msg("get public share")
 
-	return &link.GetPublicShareResponse{
-		Status: status.NewOK(ctx),
-		// Share:  share,
-	}, nil
+	pClient, err := pool.GetPublicShareProviderClient(s.c.PublicShareProviderEndpoint)
+	if err != nil {
+		log.Err(err).Msg("error connecting to a public share provider")
+		return &link.GetPublicShareResponse{
+			Status: &rpc.Status{
+				Code: rpc.Code_CODE_INTERNAL,
+			},
+		}, nil
+	}
+
+	return pClient.GetPublicShare(ctx, req)
 }
 
 func (s *svc) ListPublicShares(ctx context.Context, req *link.ListPublicSharesRequest) (*link.ListPublicSharesResponse, error) {
@@ -91,37 +114,29 @@ func (s *svc) ListPublicShares(ctx context.Context, req *link.ListPublicSharesRe
 
 	res, err := pClient.ListPublicShares(ctx, req)
 	if err != nil {
-		return nil, errors.Wrap(err, "error calling ListShares")
+		return nil, errors.Wrap(err, "error listing shares")
 	}
 
-	// res := &link.ListPublicSharesResponse{
-	// 	Status: status.NewOK(ctx),
-	// 	Share: []*link.PublicShare{
-	// &link.PublicShare{
-	// 	Id: &link.PublicShareId{
-	// 		OpaqueId: "some_publicly_shared_id",
-	// 	},
-	// 	Token:       "my_token",
-	// 	ResourceId:  &v1beta1.ResourceId{},
-	// 	Permissions: &link.PublicSharePermissions{},
-	// 	Owner:       &types.UserId{},
-	// 	Creator:     &types.UserId{},
-	// 	Ctime:       &types.Timestamp{},
-	// 	Expiration:  &types.Timestamp{},
-	// 	Mtime:       &types.Timestamp{},
-	// 	DisplayName: "some_public_share",
-	// },
-	// 	},
-	// }
 	return res, nil
 }
 
 func (s *svc) UpdatePublicShare(ctx context.Context, req *link.UpdatePublicShareRequest) (*link.UpdatePublicShareResponse, error) {
 	log := appctx.GetLogger(ctx)
-	log.Info().Msg("list public share")
+	log.Info().Msg("update public share")
 
-	res := &link.UpdatePublicShareResponse{
-		Status: status.NewOK(ctx),
+	pClient, err := pool.GetPublicShareProviderClient(s.c.PublicShareProviderEndpoint)
+	if err != nil {
+		log.Err(err).Msg("error connecting to a public share provider")
+		return &link.UpdatePublicShareResponse{
+			Status: &rpc.Status{
+				Code: rpc.Code_CODE_INTERNAL,
+			},
+		}, nil
+	}
+
+	res, err := pClient.UpdatePublicShare(ctx, req)
+	if err != nil {
+		return nil, errors.Wrap(err, "error updating share")
 	}
 	return res, nil
 }

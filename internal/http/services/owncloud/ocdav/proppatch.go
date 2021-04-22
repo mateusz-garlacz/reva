@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@
 package ocdav
 
 import (
-	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -35,38 +35,55 @@ import (
 	"github.com/pkg/errors"
 )
 
-func (s *svc) doProppatch(w http.ResponseWriter, r *http.Request, ns string) {
+func (s *svc) handleProppatch(w http.ResponseWriter, r *http.Request, ns string) {
 	ctx := r.Context()
 	ctx, span := trace.StartSpan(ctx, "proppatch")
 	defer span.End()
-	log := appctx.GetLogger(ctx)
+
+	acceptedProps := []xml.Name{}
+	removedProps := []xml.Name{}
 
 	fn := path.Join(ns, r.URL.Path)
 
+	sublog := appctx.GetLogger(ctx).With().Str("path", fn).Logger()
+
 	pp, status, err := readProppatch(r.Body)
 	if err != nil {
-		log.Error().Err(err).Msg("error reading proppatch")
+		sublog.Debug().Err(err).Msg("error reading proppatch")
 		w.WriteHeader(status)
 		return
 	}
 
 	c, err := s.getClient()
 	if err != nil {
-		log.Error().Err(err).Msg("error getting grpc client")
+		sublog.Error().Err(err).Msg("error getting grpc client")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	mkeys := []string{}
-
-	pf := &propfindXML{
-		Prop: propfindProps{},
+	// check if resource exists
+	statReq := &provider.StatRequest{
+		Ref: &provider.Reference{
+			Spec: &provider.Reference_Path{Path: fn},
+		},
 	}
+	statRes, err := c.Stat(ctx, statReq)
+	if err != nil {
+		sublog.Error().Err(err).Msg("error sending a grpc stat request")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if statRes.Status.Code != rpc.Code_CODE_OK {
+		HandleErrorStatus(&sublog, w, statRes.Status)
+		return
+	}
+
 	rreq := &provider.UnsetArbitraryMetadataRequest{
 		Ref: &provider.Reference{
 			Spec: &provider.Reference_Path{Path: fn},
 		},
-		ArbitraryMetadataKeys: []string{},
+		ArbitraryMetadataKeys: []string{""},
 	}
 	sreq := &provider.SetArbitraryMetadataRequest{
 		Ref: &provider.Reference{
@@ -81,7 +98,7 @@ func (s *svc) doProppatch(w http.ResponseWriter, r *http.Request, ns string) {
 			continue
 		}
 		for j := range pp[i].Props {
-			pf.Prop = append(pf.Prop, pp[i].Props[j].XMLName)
+			propNameXML := pp[i].Props[j].XMLName
 			// don't use path.Join. It removes the double slash! concatenate with a /
 			key := fmt.Sprintf("%s/%s", pp[i].Props[j].XMLName.Space, pp[i].Props[j].XMLName.Local)
 			value := string(pp[i].Props[j].InnerXML)
@@ -94,81 +111,56 @@ func (s *svc) doProppatch(w http.ResponseWriter, r *http.Request, ns string) {
 					remove = true
 				}
 			}
+			// Webdav spec requires the operations to be executed in the order
+			// specified in the PROPPATCH request
+			// http://www.webdav.org/specs/rfc2518.html#rfc.section.8.2
+			// FIXME: batch this somehow
 			if remove {
-				rreq.ArbitraryMetadataKeys = append(rreq.ArbitraryMetadataKeys, key)
+				rreq.ArbitraryMetadataKeys[0] = key
+				res, err := c.UnsetArbitraryMetadata(ctx, rreq)
+				if err != nil {
+					sublog.Error().Err(err).Msg("error sending a grpc UnsetArbitraryMetadata request")
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+
+				if res.Status.Code != rpc.Code_CODE_OK {
+					HandleErrorStatus(&sublog, w, res.Status)
+					return
+				}
+				removedProps = append(removedProps, propNameXML)
 			} else {
 				sreq.ArbitraryMetadata.Metadata[key] = value
-			}
-			mkeys = append(mkeys, key)
-		}
-		// what do we need to unset
-		if len(rreq.ArbitraryMetadataKeys) > 0 {
-			res, err := c.UnsetArbitraryMetadata(ctx, rreq)
-			if err != nil {
-				log.Error().Err(err).Msg("error sending a grpc UnsetArbitraryMetadata request")
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-
-			if res.Status.Code != rpc.Code_CODE_OK {
-				if res.Status.Code == rpc.Code_CODE_NOT_FOUND {
-					log.Warn().Str("path", fn).Msg("resource not found")
-					w.WriteHeader(http.StatusNotFound)
+				res, err := c.SetArbitraryMetadata(ctx, sreq)
+				if err != nil {
+					sublog.Error().Err(err).Str("key", key).Str("value", value).Msg("error sending a grpc SetArbitraryMetadata request")
+					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-		}
-		if len(sreq.ArbitraryMetadata.Metadata) > 0 {
-			res, err := c.SetArbitraryMetadata(ctx, sreq)
-			if err != nil {
-				log.Error().Err(err).Msg("error sending a grpc SetArbitraryMetadata request")
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
 
-			if res.Status.Code != rpc.Code_CODE_OK {
-				if res.Status.Code == rpc.Code_CODE_NOT_FOUND {
-					log.Warn().Str("path", fn).Msg("resource not found")
-					w.WriteHeader(http.StatusNotFound)
+				if res.Status.Code != rpc.Code_CODE_OK {
+					HandleErrorStatus(&sublog, w, res.Status)
 					return
 				}
-				w.WriteHeader(http.StatusInternalServerError)
-				return
+
+				acceptedProps = append(acceptedProps, propNameXML)
+				delete(sreq.ArbitraryMetadata.Metadata, key)
 			}
 		}
+		// FIXME: in case of error, need to set all properties back to the original state,
+		// and return the error in the matching propstat block, if applicable
+		// http://www.webdav.org/specs/rfc2518.html#rfc.section.8.2
 	}
 
-	req := &provider.StatRequest{
-		Ref: &provider.Reference{
-			Spec: &provider.Reference_Path{Path: fn},
-		},
-		ArbitraryMetadataKeys: mkeys,
+	ref := strings.TrimPrefix(fn, ns)
+	ref = path.Join(ctx.Value(ctxKeyBaseURI).(string), ref)
+	if statRes.Info.Type == provider.ResourceType_RESOURCE_TYPE_CONTAINER {
+		ref += "/"
 	}
-	res, err := c.Stat(ctx, req)
+
+	propRes, err := s.formatProppatchResponse(ctx, acceptedProps, removedProps, ref)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending a grpc stat request")
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	if res.Status.Code != rpc.Code_CODE_OK {
-		if res.Status.Code == rpc.Code_CODE_NOT_FOUND {
-			log.Warn().Str("path", fn).Msg("resource not found")
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	info := res.Info
-	infos := []*provider.ResourceInfo{info}
-
-	propRes, err := s.formatPropfind(ctx, pf, infos, ns)
-	if err != nil {
-		log.Error().Err(err).Msg("error formatting propfind")
+		sublog.Error().Err(err).Msg("error formatting proppatch response")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -176,13 +168,54 @@ func (s *svc) doProppatch(w http.ResponseWriter, r *http.Request, ns string) {
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(http.StatusMultiStatus)
 	if _, err := w.Write([]byte(propRes)); err != nil {
-		log.Err(err).Msg("error writing response")
+		sublog.Err(err).Msg("error writing response")
 	}
+}
+
+func (s *svc) formatProppatchResponse(ctx context.Context, acceptedProps []xml.Name, removedProps []xml.Name, ref string) (string, error) {
+	responses := make([]responseXML, 0, 1)
+	response := responseXML{
+		Href:     encodePath(ref),
+		Propstat: []propstatXML{},
+	}
+
+	if len(acceptedProps) > 0 {
+		propstatBody := []*propertyXML{}
+		for i := range acceptedProps {
+			propstatBody = append(propstatBody, s.newPropNS(acceptedProps[i].Space, acceptedProps[i].Local, ""))
+		}
+		response.Propstat = append(response.Propstat, propstatXML{
+			Status: "HTTP/1.1 200 OK",
+			Prop:   propstatBody,
+		})
+	}
+
+	if len(removedProps) > 0 {
+		propstatBody := []*propertyXML{}
+		for i := range removedProps {
+			propstatBody = append(propstatBody, s.newPropNS(removedProps[i].Space, removedProps[i].Local, ""))
+		}
+		response.Propstat = append(response.Propstat, propstatXML{
+			Status: "HTTP/1.1 204 No Content",
+			Prop:   propstatBody,
+		})
+	}
+
+	responses = append(responses, response)
+	responsesXML, err := xml.Marshal(&responses)
+	if err != nil {
+		return "", err
+	}
+
+	msg := `<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:" `
+	msg += `xmlns:s="http://sabredav.org/ns" xmlns:oc="http://owncloud.org/ns">`
+	msg += string(responsesXML) + `</d:multistatus>`
+	return msg, nil
 }
 
 func (s *svc) isBooleanProperty(prop string) bool {
 	// TODO add other properties we know to be boolean?
-	return prop == "http://owncloud.org/ns/favorite"
+	return prop == _propOcFavorite
 }
 
 func (s *svc) as0or1(val string) string {
@@ -211,35 +244,6 @@ type Proppatch struct {
 	Props []propertyXML
 }
 
-type xmlValue []byte
-
-func (v *xmlValue) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
-	// The XML value of a property can be arbitrary, mixed-content XML.
-	// To make sure that the unmarshalled value contains all required
-	// namespaces, we encode all the property value XML tokens into a
-	// buffer. This forces the encoder to redeclare any used namespaces.
-	var b bytes.Buffer
-	e := xml.NewEncoder(&b)
-	for {
-		t, err := next(d)
-		if err != nil {
-			return err
-		}
-		if e, ok := t.(xml.EndElement); ok && e.Name == start.Name {
-			break
-		}
-		if err = e.EncodeToken(t); err != nil {
-			return err
-		}
-	}
-	err := e.Flush()
-	if err != nil {
-		return err
-	}
-	*v = b.Bytes()
-	return nil
-}
-
 // http://www.webdav.org/specs/rfc4918.html#ELEMENT_prop (for proppatch)
 type proppatchProps []propertyXML
 
@@ -265,14 +269,13 @@ func (ps *proppatchProps) UnmarshalXML(d *xml.Decoder, start xml.StartElement) e
 			}
 			return nil
 		case xml.StartElement:
-			p := propertyXML{
-				XMLName: t.(xml.StartElement).Name,
-				Lang:    xmlLang(t.(xml.StartElement), lang),
-			}
-			err = d.DecodeElement(((*xmlValue)(&p.InnerXML)), &elem)
+			p := propertyXML{}
+			err = d.DecodeElement(&p, &elem)
 			if err != nil {
 				return err
 			}
+			// special handling for the lang property
+			p.Lang = xmlLang(t.(xml.StartElement), lang)
 			*ps = append(*ps, p)
 		}
 	}
@@ -301,9 +304,9 @@ func readProppatch(r io.Reader) (patches []Proppatch, status int, err error) {
 	for _, op := range pu.SetRemove {
 		remove := false
 		switch op.XMLName {
-		case xml.Name{Space: "DAV:", Local: "set"}:
+		case xml.Name{Space: _nsDav, Local: "set"}:
 			// No-op.
-		case xml.Name{Space: "DAV:", Local: "remove"}:
+		case xml.Name{Space: _nsDav, Local: "remove"}:
 			for _, p := range op.Prop {
 				if len(p.InnerXML) > 0 {
 					return nil, http.StatusBadRequest, errInvalidProppatch

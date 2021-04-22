@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -41,12 +41,19 @@ type config struct {
 	Drivers map[string]map[string]interface{} `mapstructure:"drivers"`
 }
 
+func (c *config) init() {
+	if c.Driver == "" {
+		c.Driver = "json"
+	}
+}
+
 func parseConfig(m map[string]interface{}) (*config, error) {
 	c := &config{}
 	if err := mapstructure.Decode(m, c); err != nil {
 		err = errors.Wrap(err, "error decoding conf")
 		return nil, err
 	}
+	c.init()
 	return c, nil
 }
 
@@ -84,7 +91,7 @@ func (s *service) Close() error {
 }
 
 func (s *service) UnprotectedEndpoints() []string {
-	return []string{}
+	return []string{"/cs3.identity.user.v1beta1.UserAPI/GetUser"}
 }
 
 func (s *service) Register(ss *grpc.Server) {
@@ -97,12 +104,30 @@ func (s *service) GetUser(ctx context.Context, req *userpb.GetUserRequest) (*use
 		// TODO(labkode): check for not found.
 		err = errors.Wrap(err, "userprovidersvc: error getting user")
 		res := &userpb.GetUserResponse{
-			Status: status.NewInternal(ctx, err, "error authenticating user"),
+			Status: status.NewInternal(ctx, err, "error getting user"),
 		}
 		return res, nil
 	}
 
 	res := &userpb.GetUserResponse{
+		Status: status.NewOK(ctx),
+		User:   user,
+	}
+	return res, nil
+}
+
+func (s *service) GetUserByClaim(ctx context.Context, req *userpb.GetUserByClaimRequest) (*userpb.GetUserByClaimResponse, error) {
+	user, err := s.usermgr.GetUserByClaim(ctx, req.Claim, req.Value)
+	if err != nil {
+		// TODO(labkode): check for not found.
+		err = errors.Wrap(err, "userprovidersvc: error getting user by claim")
+		res := &userpb.GetUserByClaimResponse{
+			Status: status.NewInternal(ctx, err, "error getting user by claim"),
+		}
+		return res, nil
+	}
+
+	res := &userpb.GetUserByClaimResponse{
 		Status: status.NewOK(ctx),
 		User:   user,
 	}
@@ -140,23 +165,5 @@ func (s *service) GetUserGroups(ctx context.Context, req *userpb.GetUserGroupsRe
 		Status: status.NewOK(ctx),
 		Groups: groups,
 	}
-	return res, nil
-}
-
-func (s *service) IsInGroup(ctx context.Context, req *userpb.IsInGroupRequest) (*userpb.IsInGroupResponse, error) {
-	ok, err := s.usermgr.IsInGroup(ctx, req.UserId, req.Group)
-	if err != nil {
-		err = errors.Wrap(err, "userprovidersvc: error checking if user belongs to group")
-		res := &userpb.IsInGroupResponse{
-			Status: status.NewInternal(ctx, err, "error checking if user belongs to group"),
-		}
-		return res, nil
-	}
-
-	res := &userpb.IsInGroupResponse{
-		Status: status.NewOK(ctx),
-		Ok:     ok,
-	}
-
 	return res, nil
 }

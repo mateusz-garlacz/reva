@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,30 +22,41 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"path"
 	"strings"
 
 	gateway "github.com/cs3org/go-cs3apis/cs3/gateway/v1beta1"
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	provider "github.com/cs3org/go-cs3apis/cs3/storage/provider/v1beta1"
+	typespb "github.com/cs3org/go-cs3apis/cs3/types/v1beta1"
+	"github.com/cs3org/reva/internal/http/services/datagateway"
 	"github.com/cs3org/reva/pkg/appctx"
 	"github.com/cs3org/reva/pkg/rhttp"
+	"go.opencensus.io/trace"
 )
 
-func (s *svc) doCopy(w http.ResponseWriter, r *http.Request, ns string) {
+func (s *svc) handleCopy(w http.ResponseWriter, r *http.Request, ns string) {
 	ctx := r.Context()
-	log := appctx.GetLogger(ctx)
+	ctx, span := trace.StartSpan(ctx, "head")
+	defer span.End()
+
 	src := path.Join(ns, r.URL.Path)
 	dstHeader := r.Header.Get("Destination")
 	overwrite := r.Header.Get("Overwrite")
+	depth := r.Header.Get("Depth")
+	if depth == "" {
+		depth = "infinity"
+	}
 
-	log.Info().Str("source", src).Str("destination", dstHeader).Str("overwrite", overwrite).Msg("copy")
-
-	if dstHeader == "" {
+	dst, err := extractDestination(dstHeader, r.Context().Value(ctxKeyBaseURI).(string))
+	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	dst = path.Join(ns, dst)
+
+	sublog := appctx.GetLogger(ctx).With().Str("src", src).Str("dst", dst).Logger()
+	sublog.Debug().Str("overwrite", overwrite).Str("depth", depth).Msg("copy")
 
 	overwrite = strings.ToUpper(overwrite)
 	if overwrite == "" {
@@ -57,27 +68,15 @@ func (s *svc) doCopy(w http.ResponseWriter, r *http.Request, ns string) {
 		return
 	}
 
+	if depth != "infinity" && depth != "0" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	client, err := s.getClient()
 	if err != nil {
-		log.Error().Err(err).Msg("error getting grpc client")
+		sublog.Error().Err(err).Msg("error getting grpc client")
 		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	// strip baseURL from destination
-	dstURL, err := url.ParseRequestURI(dstHeader)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	urlPath := dstURL.Path
-	baseURI := r.Context().Value(ctxKeyBaseURI).(string)
-	log.Info().Str("url-path", urlPath).Str("base-uri", baseURI).Msg("copy")
-	// TODO replace with HasPrefix:
-	i := strings.Index(urlPath, baseURI)
-	if i == -1 {
-		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
@@ -88,23 +87,15 @@ func (s *svc) doCopy(w http.ResponseWriter, r *http.Request, ns string) {
 	srcStatReq := &provider.StatRequest{Ref: ref}
 	srcStatRes, err := client.Stat(ctx, srcStatReq)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending grpc stat request")
+		sublog.Error().Err(err).Msg("error sending grpc stat request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	if srcStatRes.Status.Code != rpc.Code_CODE_OK {
-		if srcStatRes.Status.Code == rpc.Code_CODE_NOT_FOUND {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
+		HandleErrorStatus(&sublog, w, srcStatRes.Status)
 		return
 	}
-
-	// TODO check if path is on same storage, return 502 on problems, see https://tools.ietf.org/html/rfc4918#section-9.9.4
-	// prefix to namespace
-	dst := path.Join(ns, urlPath[len(baseURI):])
 
 	// check dst exists
 	ref = &provider.Reference{
@@ -113,24 +104,26 @@ func (s *svc) doCopy(w http.ResponseWriter, r *http.Request, ns string) {
 	dstStatReq := &provider.StatRequest{Ref: ref}
 	dstStatRes, err := client.Stat(ctx, dstStatReq)
 	if err != nil {
-		log.Error().Err(err).Msg("error sending grpc stat request")
+		sublog.Error().Err(err).Msg("error sending grpc stat request")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	if dstStatRes.Status.Code != rpc.Code_CODE_OK && dstStatRes.Status.Code != rpc.Code_CODE_NOT_FOUND {
+		HandleErrorStatus(&sublog, w, srcStatRes.Status)
+		return
+	}
 
-	var successCode int
+	successCode := http.StatusCreated // 201 if new resource was created, see https://tools.ietf.org/html/rfc4918#section-9.8.5
 	if dstStatRes.Status.Code == rpc.Code_CODE_OK {
 		successCode = http.StatusNoContent // 204 if target already existed, see https://tools.ietf.org/html/rfc4918#section-9.8.5
 
 		if overwrite == "F" {
-			log.Warn().Str("dst", dst).Msg("dst already exists")
+			sublog.Warn().Str("overwrite", overwrite).Msg("dst already exists")
 			w.WriteHeader(http.StatusPreconditionFailed) // 412, see https://tools.ietf.org/html/rfc4918#section-9.8.5
 			return
 		}
 
 	} else {
-		successCode = http.StatusCreated // 201 if new resource was created, see https://tools.ietf.org/html/rfc4918#section-9.8.5
-
 		// check if an intermediate path / the parent exists
 		intermediateDir := path.Dir(dst)
 		ref = &provider.Reference{
@@ -139,27 +132,33 @@ func (s *svc) doCopy(w http.ResponseWriter, r *http.Request, ns string) {
 		intStatReq := &provider.StatRequest{Ref: ref}
 		intStatRes, err := client.Stat(ctx, intStatReq)
 		if err != nil {
-			log.Error().Err(err).Msg("error sending grpc stat request")
+			sublog.Error().Err(err).Msg("error sending grpc stat request")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		if intStatRes.Status.Code == rpc.Code_CODE_NOT_FOUND {
-			w.WriteHeader(http.StatusConflict) // 409 if intermediate dir is missing, see https://tools.ietf.org/html/rfc4918#section-9.8.5
+		if intStatRes.Status.Code != rpc.Code_CODE_OK {
+			if intStatRes.Status.Code == rpc.Code_CODE_NOT_FOUND {
+				// 409 if intermediate dir is missing, see https://tools.ietf.org/html/rfc4918#section-9.8.5
+				sublog.Debug().Str("parent", intermediateDir).Interface("status", intStatRes.Status).Msg("conflict")
+				w.WriteHeader(http.StatusConflict)
+			} else {
+				HandleErrorStatus(&sublog, w, srcStatRes.Status)
+			}
 			return
 		}
 		// TODO what if intermediate is a file?
 	}
 
-	err = descend(ctx, client, srcStatRes.Info, dst)
+	err = s.descend(ctx, client, srcStatRes.Info, dst, depth == "infinity")
 	if err != nil {
-		log.Error().Err(err).Msg("error descending directory")
+		sublog.Error().Err(err).Str("depth", depth).Msg("error descending directory")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(successCode)
 }
 
-func descend(ctx context.Context, client gateway.GatewayAPIClient, src *provider.ResourceInfo, dst string) error {
+func (s *svc) descend(ctx context.Context, client gateway.GatewayAPIClient, src *provider.ResourceInfo, dst string, recurse bool) error {
 	log := appctx.GetLogger(ctx)
 	log.Debug().Str("src", src.Path).Str("dst", dst).Msg("descending")
 	if src.Type == provider.ResourceType_RESOURCE_TYPE_CONTAINER {
@@ -172,6 +171,12 @@ func descend(ctx context.Context, client gateway.GatewayAPIClient, src *provider
 		createRes, err := client.CreateContainer(ctx, createReq)
 		if err != nil || createRes.Status.Code != rpc.Code_CODE_OK {
 			return err
+		}
+
+		// TODO: also copy properties: https://tools.ietf.org/html/rfc4918#section-9.8.2
+
+		if !recurse {
+			return nil
 		}
 
 		// descend for children
@@ -190,7 +195,7 @@ func descend(ctx context.Context, client gateway.GatewayAPIClient, src *provider
 
 		for i := range res.Infos {
 			childDst := path.Join(dst, path.Base(res.Infos[i].Path))
-			err := descend(ctx, client, res.Infos[i], childDst)
+			err := s.descend(ctx, client, res.Infos[i], childDst, recurse)
 			if err != nil {
 				return err
 			}
@@ -200,6 +205,7 @@ func descend(ctx context.Context, client gateway.GatewayAPIClient, src *provider
 		// copy file
 
 		// 1. get download url
+
 		dReq := &provider.InitiateFileDownloadRequest{
 			Ref: &provider.Reference{
 				Spec: &provider.Reference_Path{Path: src.Path},
@@ -215,11 +221,27 @@ func descend(ctx context.Context, client gateway.GatewayAPIClient, src *provider
 			return fmt.Errorf("status code %d", dRes.Status.Code)
 		}
 
+		var downloadEP, downloadToken string
+		for _, p := range dRes.Protocols {
+			if p.Protocol == "simple" {
+				downloadEP, downloadToken = p.DownloadEndpoint, p.Token
+			}
+		}
+
 		// 2. get upload url
 
 		uReq := &provider.InitiateFileUploadRequest{
 			Ref: &provider.Reference{
 				Spec: &provider.Reference_Path{Path: dst},
+			},
+			Opaque: &typespb.Opaque{
+				Map: map[string]*typespb.OpaqueEntry{
+					"Upload-Length": {
+						Decoder: "plain",
+						// TODO: handle case where size is not known in advance
+						Value: []byte(fmt.Sprintf("%d", src.GetSize())),
+					},
+				},
 			},
 		}
 
@@ -232,45 +254,48 @@ func descend(ctx context.Context, client gateway.GatewayAPIClient, src *provider
 			return fmt.Errorf("status code %d", uRes.Status.Code)
 		}
 
+		var uploadEP, uploadToken string
+		for _, p := range uRes.Protocols {
+			if p.Protocol == "simple" {
+				uploadEP, uploadToken = p.UploadEndpoint, p.Token
+			}
+		}
+
 		// 3. do download
 
-		httpDownloadReq, err := rhttp.NewRequest(ctx, "GET", dRes.DownloadEndpoint, nil)
+		httpDownloadReq, err := rhttp.NewRequest(ctx, "GET", downloadEP, nil)
 		if err != nil {
 			return err
 		}
+		httpDownloadReq.Header.Set(datagateway.TokenTransportHeader, downloadToken)
 
-		httpDownloadClient := rhttp.GetHTTPClient(ctx)
-
-		httpDownloadRes, err := httpDownloadClient.Do(httpDownloadReq)
+		httpDownloadRes, err := s.client.Do(httpDownloadReq)
 		if err != nil {
 			return err
 		}
 		defer httpDownloadRes.Body.Close()
-
 		if httpDownloadRes.StatusCode != http.StatusOK {
 			return fmt.Errorf("status code %d", httpDownloadRes.StatusCode)
 		}
 
-		// do upload
-		// TODO(jfd): check if large files are really streamed
+		// 4. do upload
 
-		httpUploadReq, err := rhttp.NewRequest(ctx, "PUT", uRes.UploadEndpoint, httpDownloadRes.Body)
-		if err != nil {
-			return err
+		if src.GetSize() > 0 {
+			httpUploadReq, err := rhttp.NewRequest(ctx, "PUT", uploadEP, httpDownloadRes.Body)
+			if err != nil {
+				return err
+			}
+			httpUploadReq.Header.Set(datagateway.TokenTransportHeader, uploadToken)
+
+			httpUploadRes, err := s.client.Do(httpUploadReq)
+			if err != nil {
+				return err
+			}
+			defer httpUploadRes.Body.Close()
+			if httpUploadRes.StatusCode != http.StatusOK {
+				return err
+			}
 		}
-
-		httpUploadClient := rhttp.GetHTTPClient(ctx)
-
-		httpRes, err := httpUploadClient.Do(httpUploadReq)
-		if err != nil {
-			return err
-		}
-		defer httpRes.Body.Close()
-
-		if httpRes.StatusCode != http.StatusOK {
-			return fmt.Errorf("status code %d", httpDownloadRes.StatusCode)
-		}
-
 	}
 	return nil
 }

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,10 +19,11 @@
 package main
 
 import (
-	"fmt"
+	"io"
 	"os"
 	"time"
 
+	grouppb "github.com/cs3org/go-cs3apis/cs3/identity/group/v1beta1"
 	userpb "github.com/cs3org/go-cs3apis/cs3/identity/user/v1beta1"
 	rpc "github.com/cs3org/go-cs3apis/cs3/rpc/v1beta1"
 	collaboration "github.com/cs3org/go-cs3apis/cs3/sharing/collaboration/v1beta1"
@@ -34,22 +35,24 @@ import (
 func shareCreateCommand() *command {
 	cmd := newCommand("share-create")
 	cmd.Description = func() string { return "create share to a user or group" }
-	cmd.Usage = func() string { return "Usage: share create [-flags] <path>" }
+	cmd.Usage = func() string { return "Usage: share-create [-flags] <path>" }
 	grantType := cmd.String("type", "user", "grantee type (user or group)")
 	grantee := cmd.String("grantee", "", "the grantee")
 	idp := cmd.String("idp", "", "the idp of the grantee, default to same idp as the user triggering the action")
 	rol := cmd.String("rol", "viewer", "the permission for the share (viewer or editor)")
-	cmd.Action = func() error {
+
+	cmd.ResetFlags = func() {
+		*grantType, *grantee, *idp, *rol = "user", "", "", "viewer"
+	}
+
+	cmd.Action = func(w ...io.Writer) error {
 		if cmd.NArg() < 1 {
-			fmt.Println(cmd.Usage())
-			os.Exit(1)
+			return errors.New("Invalid arguments: " + cmd.Usage())
 		}
 
 		// validate flags
 		if *grantee == "" {
-			fmt.Println("grantee cannot be empty: use -grantee flag")
-			fmt.Println(cmd.Usage())
-			os.Exit(1)
+			return errors.New("Grantee cannot be empty: use -grantee flag\n" + cmd.Usage())
 		}
 
 		fn := cmd.Args()[0]
@@ -82,15 +85,28 @@ func shareCreateCommand() *command {
 		gt := getGrantType(*grantType)
 
 		grant := &collaboration.ShareGrant{
-			Permissions: perm,
+			Permissions: &collaboration.SharePermissions{
+				Permissions: perm,
+			},
 			Grantee: &provider.Grantee{
 				Type: gt,
-				Id: &userpb.UserId{
-					Idp:      *idp,
-					OpaqueId: *grantee,
-				},
 			},
 		}
+		switch *grantType {
+		case "user":
+			grant.Grantee.Id = &provider.Grantee_UserId{UserId: &userpb.UserId{
+				Idp:      *idp,
+				OpaqueId: *grantee,
+			}}
+		case "group":
+			grant.Grantee.Id = &provider.Grantee_GroupId{GroupId: &grouppb.GroupId{
+				Idp:      *idp,
+				OpaqueId: *grantee,
+			}}
+		default:
+			return errors.New("Invalid grantee type argument: " + *grantType)
+		}
+
 		shareRequest := &collaboration.CreateShareRequest{
 			ResourceInfo: res.Info,
 			Grant:        grant,
@@ -110,8 +126,16 @@ func shareCreateCommand() *command {
 		t.AppendHeader(table.Row{"#", "Owner.Idp", "Owner.OpaqueId", "ResourceId", "Permissions", "Type", "Grantee.Idp", "Grantee.OpaqueId", "Created", "Updated"})
 
 		s := shareRes.Share
+		var idp, opaque string
+		if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_USER {
+			idp, opaque = s.Grantee.GetUserId().Idp, s.Grantee.GetUserId().OpaqueId
+		} else if s.Grantee.Type == provider.GranteeType_GRANTEE_TYPE_GROUP {
+			idp, opaque = s.Grantee.GetGroupId().Idp, s.Grantee.GetGroupId().OpaqueId
+		}
 		t.AppendRows([]table.Row{
-			{s.Id.OpaqueId, s.Owner.Idp, s.Owner.OpaqueId, s.ResourceId.String(), s.Permissions.String(), s.Grantee.Type.String(), s.Grantee.Id.Idp, s.Grantee.Id.OpaqueId, time.Unix(int64(s.Ctime.Seconds), 0), time.Unix(int64(s.Mtime.Seconds), 0)},
+			{s.Id.OpaqueId, s.Owner.Idp, s.Owner.OpaqueId, s.ResourceId.String(), s.Permissions.String(),
+				s.Grantee.Type.String(), idp, opaque,
+				time.Unix(int64(s.Ctime.Seconds), 0), time.Unix(int64(s.Mtime.Seconds), 0)},
 		})
 		t.Render()
 
@@ -131,31 +155,27 @@ func getGrantType(t string) provider.GranteeType {
 	}
 }
 
-func getSharePerm(p string) (*collaboration.SharePermissions, error) {
-	if p == "viewer" {
-		return &collaboration.SharePermissions{
-			Permissions: &provider.ResourcePermissions{
-				GetPath:              true,
-				InitiateFileDownload: true,
-				ListFileVersions:     true,
-				ListContainer:        true,
-				Stat:                 true,
-			},
+func getSharePerm(p string) (*provider.ResourcePermissions, error) {
+	if p == viewerPermission {
+		return &provider.ResourcePermissions{
+			GetPath:              true,
+			InitiateFileDownload: true,
+			ListFileVersions:     true,
+			ListContainer:        true,
+			Stat:                 true,
 		}, nil
-	} else if p == "editor" {
-		return &collaboration.SharePermissions{
-			Permissions: &provider.ResourcePermissions{
-				GetPath:              true,
-				InitiateFileDownload: true,
-				ListFileVersions:     true,
-				ListContainer:        true,
-				Stat:                 true,
-				CreateContainer:      true,
-				Delete:               true,
-				InitiateFileUpload:   true,
-				RestoreFileVersion:   true,
-				Move:                 true,
-			},
+	} else if p == editorPermission {
+		return &provider.ResourcePermissions{
+			GetPath:              true,
+			InitiateFileDownload: true,
+			ListFileVersions:     true,
+			ListContainer:        true,
+			Stat:                 true,
+			CreateContainer:      true,
+			Delete:               true,
+			InitiateFileUpload:   true,
+			RestoreFileVersion:   true,
+			Move:                 true,
 		}, nil
 	}
 	return nil, errors.New("invalid rol: " + p)

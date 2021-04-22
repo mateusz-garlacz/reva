@@ -18,7 +18,9 @@
 
 package conversions
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // Permissions reflects the CRUD permissions used in the OCS sharing API
 type Permissions uint
@@ -40,31 +42,23 @@ const (
 	PermissionAll Permissions = (1 << (iota - 1)) - 1
 )
 
-// NewPermissions creates a new Permissions instanz.
+var (
+	// ErrPermissionNotInRange defines a permission specific error.
+	ErrPermissionNotInRange = fmt.Errorf("The provided permission is not between %d and %d", PermissionInvalid, PermissionAll)
+)
+
+// NewPermissions creates a new Permissions instance.
 // The value must be in the valid range.
 func NewPermissions(val int) (Permissions, error) {
-	if val <= int(PermissionInvalid) || int(PermissionAll) < val {
+	if val == int(PermissionInvalid) {
 		return PermissionInvalid, fmt.Errorf("permissions %d out of range %d - %d", val, PermissionRead, PermissionAll)
+	} else if val < int(PermissionInvalid) || int(PermissionAll) < val {
+		return PermissionInvalid, ErrPermissionNotInRange
 	}
 	return Permissions(val), nil
 }
 
 // Contain tests if the permissions contain another one.
 func (p Permissions) Contain(other Permissions) bool {
-	return p&other != 0
-}
-
-// Permissions2Role performs permission conversions
-func Permissions2Role(p Permissions) string {
-	role := RoleLegacy
-	if p.Contain(PermissionRead) {
-		role = RoleViewer
-	}
-	if p.Contain(PermissionWrite) {
-		role = RoleEditor
-	}
-	if p.Contain(PermissionShare) {
-		role = RoleCoowner
-	}
-	return role
+	return p&other == other
 }

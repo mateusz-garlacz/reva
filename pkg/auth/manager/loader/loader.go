@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,5 +25,6 @@ import (
 	_ "github.com/cs3org/reva/pkg/auth/manager/json"
 	_ "github.com/cs3org/reva/pkg/auth/manager/ldap"
 	_ "github.com/cs3org/reva/pkg/auth/manager/oidc"
+	_ "github.com/cs3org/reva/pkg/auth/manager/publicshares"
 	// Add your own here
 )

@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,10 +26,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/cs3org/reva/pkg/appctx"
 )
+
+// TODO(jfd) get rid of the differences between unix and windows. the inode and dev should never be used for the etag because it interferes with backups
 
 // calcEtag will create an etag based on the md5 of
 // - mtime,
@@ -40,7 +43,7 @@ import (
 func calcEtag(ctx context.Context, fi os.FileInfo) string {
 	log := appctx.GetLogger(ctx)
 	h := md5.New()
-	err := binary.Write(h, binary.BigEndian, fi.ModTime().Unix())
+	err := binary.Write(h, binary.BigEndian, fi.ModTime().UnixNano())
 	if err != nil {
 		log.Error().Err(err).Msg("error writing mtime")
 	}
@@ -60,5 +63,6 @@ func calcEtag(ctx context.Context, fi os.FileInfo) string {
 	if err != nil {
 		log.Error().Err(err).Msg("error writing size")
 	}
-	return fmt.Sprintf(`"%x"`, h.Sum(nil))
+	etag := fmt.Sprintf(`"%x"`, h.Sum(nil))
+	return fmt.Sprintf("\"%s\"", strings.Trim(etag, "\""))
 }

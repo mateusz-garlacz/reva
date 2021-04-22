@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,12 +20,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 )
 
 var versionCommand = func() *command {
 	cmd := newCommand("version")
 	cmd.Description = func() string { return "prints version information for this tool" }
-	cmd.Action = func() error {
+	cmd.Action = func(w ...io.Writer) error {
 		msg := "version=%s "
 		msg += "commit=%s "
 		msg += "go_version=%s "

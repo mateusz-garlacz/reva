@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,10 +22,12 @@ import (
 	"net/http"
 
 	"contrib.go.opencensus.io/exporter/prometheus"
-	"github.com/cs3org/reva/pkg/rhttp/global"
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
+	"github.com/rs/zerolog"
 	"go.opencensus.io/stats/view"
+
+	"github.com/cs3org/reva/pkg/rhttp/global"
 )
 
 func init() {
@@ -33,15 +35,13 @@ func init() {
 }
 
 // New returns a new prometheus service
-func New(m map[string]interface{}) (global.Service, error) {
+func New(m map[string]interface{}, log *zerolog.Logger) (global.Service, error) {
 	conf := &config{}
 	if err := mapstructure.Decode(m, conf); err != nil {
 		return nil, err
 	}
 
-	if conf.Prefix == "" {
-		conf.Prefix = "metrics"
-	}
+	conf.init()
 
 	pe, err := prometheus.NewExporter(prometheus.Options{
 		Namespace: "revad",
@@ -51,12 +51,17 @@ func New(m map[string]interface{}) (global.Service, error) {
 	}
 
 	view.RegisterExporter(pe)
-
 	return &svc{prefix: conf.Prefix, h: pe}, nil
 }
 
 type config struct {
 	Prefix string `mapstructure:"prefix"`
+}
+
+func (c *config) init() {
+	if c.Prefix == "" {
+		c.Prefix = "metrics"
+	}
 }
 
 type svc struct {

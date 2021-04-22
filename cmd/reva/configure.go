@@ -1,4 +1,4 @@
-// Copyright 2018-2020 CERN
+// Copyright 2018-2021 CERN
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,13 +21,14 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 )
 
 var configureCommand = func() *command {
 	cmd := newCommand("configure")
 	cmd.Description = func() string { return "configure the reva client" }
-	cmd.Action = func() error {
+	cmd.Action = func(w ...io.Writer) error {
 		reader := bufio.NewReader(os.Stdin)
 		fmt.Print("host: ")
 		text, err := read(reader)
@@ -35,11 +36,11 @@ var configureCommand = func() *command {
 			return err
 		}
 
-		c := &config{Host: text}
-		if err := writeConfig(c); err != nil {
-			panic(err)
+		conf = &config{Host: text}
+		if err := writeConfig(conf); err != nil {
+			return err
 		}
-		fmt.Println("config saved in ", getConfigFile())
+		fmt.Println("config saved at ", getConfigFile())
 		return nil
 	}
 	return cmd
