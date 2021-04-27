@@ -21,7 +21,7 @@ driver = "json"
 
 # Note that ocmcore and ocmshareprovider should use the same file for storing the shares.
 [grpc.services.ocmcore.drivers.json]
-file = "/var/tmp/reva/shares_server_1_test2.json"
+file = "/var/tmp/reva/shares_server_reva_2.json"
 
 [grpc.services.ocminvitemanager]
 driver = "json"
@@ -30,7 +30,7 @@ driver = "json"
 driver = "json"
 
 [grpc.services.ocmshareprovider.drivers.json]
-file = "/var/tmp/reva/shares_server_1_test2.json"
+file = "/var/tmp/reva/shares_server_reva_2.json"
 
 [grpc.services.ocmproviderauthorizer]
 driver = "json"
@@ -44,8 +44,8 @@ driver = "memory"
 [grpc.services.appprovider]
 driver = "demo"
 iopsecret = "testsecret"
-wopiurl = "http://0.0.0.0:8880/"
-wopibridgeurl = "http://localhost:8000/wopib"
+wopiurl = "http://0.0.0.0:8889/"
+wopibridgeurl = "http://localhost:8001/wopib"
 
 [grpc.services.appregistry]
 driver = "static"
@@ -109,7 +109,3 @@ providers = "providers.demo.json"
 
 [http.services.ocs]
 prefix = "ocs"
-
-[http.services.ocdav]
-
-[http.middlewares.cors]

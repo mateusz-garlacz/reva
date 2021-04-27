@@ -17,7 +17,6 @@ ocmcoresvc = "localhost:20000"
 ocmshareprovidersvc = "localhost:20000"
 ocminvitemanagersvc = "localhost:20000"
 ocmproviderauthorizersvc = "localhost:20000"
-#commit_share_to_storage_grant = false
 datagateway = "http://localhost:20001/data"
 transfer_expires = 6 # give it a moment
 commit_share_to_storage_grant = true
