@@ -9,7 +9,7 @@ require (
 	github.com/Masterminds/sprig v2.22.0+incompatible
 	github.com/ReneKroon/ttlcache/v2 v2.4.0
 	github.com/aws/aws-sdk-go v1.38.13
-	github.com/bluele/gcache v0.0.2 // indirect
+	github.com/bluele/gcache v0.0.2
 	github.com/c-bata/go-prompt v0.2.5
 	github.com/cheggaaa/pb v1.0.29
 	github.com/coreos/go-oidc v2.2.1+incompatible
@@ -31,7 +31,7 @@ require (
 	github.com/imdario/mergo v0.3.8 // indirect
 	github.com/jedib0t/go-pretty v4.3.0+incompatible
 	github.com/mattn/go-sqlite3 v2.0.3+incompatible
-	github.com/minio/minio-go/v7 v7.0.10
+	github.com/minio/minio-go/v7 v7.0.12
 	github.com/mitchellh/copystructure v1.0.0 // indirect
 	github.com/mitchellh/mapstructure v1.4.1
 	github.com/onsi/ginkgo v1.16.1
@@ -47,7 +47,7 @@ require (
 	github.com/studio-b12/gowebdav v0.0.0-20200303150724-9380631c29a1
 	github.com/tus/tusd v1.1.1-0.20200416115059-9deabf9d80c2
 	go.opencensus.io v0.23.0
-	golang.org/x/crypto v0.0.0-20201203163018-be400aefbc4c
+	golang.org/x/crypto v0.0.0-20201216223049-8b5274cf687f
 	golang.org/x/net v0.0.0-20201202161906-c7110b5ffcbb
 	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d
 	golang.org/x/sys v0.0.0-20210218155724-8ebf48af031b
